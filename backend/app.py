@@ -183,6 +183,21 @@ def create_app():
         monday_dt = current_dt - timedelta(days=current_dt.weekday())
         return monday_dt.strftime("%Y-%m-%d"), current_dt.weekday() + 1
 
+    def _is_valid_ipv4(ip_value):
+        text = (ip_value or "").strip()
+        if not text:
+            return True
+        parts = text.split(".")
+        if len(parts) != 4:
+            return False
+        for part in parts:
+            if not part.isdigit():
+                return False
+            num = int(part)
+            if num < 0 or num > 255:
+                return False
+        return True
+
     def _shift_start_datetime(week_start, day_of_week, shift_code):
         shift = SHIFT_DEFINITION_MAP.get(shift_code)
         if not shift:
@@ -429,6 +444,19 @@ def create_app():
 
         return branch_id, one_time_code, qr_token, None
 
+    def _cleanup_one_time_qr_codes(conn):
+        now_dt = datetime.now()
+        expired_before = _format_db_datetime(now_dt - timedelta(days=2))
+        consumed_before = _format_db_datetime(now_dt - timedelta(days=7))
+        conn.execute(
+            """
+            DELETE FROM attendance_qr_one_time_codes
+            WHERE expires_at < ?
+               OR (consumed_at IS NOT NULL AND consumed_at < ?)
+            """,
+            (expired_before, consumed_before),
+        )
+
     def _get_branch_staffing_rules(conn, branch_id):
         rows = conn.execute(
             """
@@ -573,6 +601,53 @@ def create_app():
                 "user": _permission_payload(user_payload),
             }
         )
+
+    @app.post("/api/change-password-login")
+    def change_password_login():
+        body = request.get_json(silent=True) or {}
+        username = (body.get("username") or "").strip()
+        current_password = body.get("current_password") or ""
+        new_password = body.get("new_password") or ""
+
+        if not username:
+            return jsonify({"error": "username is required"}), 400
+        if not current_password:
+            return jsonify({"error": "current_password is required"}), 400
+        if not new_password:
+            return jsonify({"error": "new_password is required"}), 400
+        if len(new_password) < 8:
+            return jsonify({"error": "Mật khẩu mới phải có ít nhất 8 ký tự"}), 400
+        if new_password == current_password:
+            return jsonify({"error": "Mật khẩu mới phải khác mật khẩu hiện tại"}), 400
+
+        conn = get_conn()
+        user = conn.execute(
+            """
+            SELECT id, username, password_hash, is_active
+            FROM users
+            WHERE username = ?
+            """,
+            (username,),
+        ).fetchone()
+
+        if not user:
+            conn.close()
+            return jsonify({"error": "User not found"}), 404
+        if not user["is_active"]:
+            conn.close()
+            return jsonify({"error": "User is inactive"}), 403
+        if not user["password_hash"] or not check_password_hash(user["password_hash"], current_password):
+            conn.close()
+            return jsonify({"error": "Mật khẩu hiện tại không đúng"}), 401
+
+        conn.execute(
+            "UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (generate_password_hash(new_password), user["id"]),
+        )
+        conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user["id"],))
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Đổi mật khẩu thành công. Vui lòng đăng nhập lại."})
 
     @app.post("/api/logout")
     def logout():
@@ -795,8 +870,8 @@ def create_app():
             conn.close()
             return jsonify({"error": "No open attendance session to check-out"}), 400
 
-        check_in_dt = datetime.strptime(open_log["check_in_at"], "%Y-%m-%d %H:%M:%S")
-        minutes = max(1, int((datetime.utcnow() - check_in_dt).total_seconds() // 60))
+        check_in_dt = _parse_db_datetime(open_log["check_in_at"])
+        minutes = max(1, int((datetime.now() - check_in_dt).total_seconds() // 60))
         conn.execute(
             """
             UPDATE attendance_logs
@@ -871,6 +946,8 @@ def create_app():
         qr_token = _build_attendance_qr_token(branch["id"], expires_ts, qr_nonce)
         one_time_code = _generate_one_time_attendance_code()
         expires_at = _format_db_datetime(expires_at_dt)
+
+        _cleanup_one_time_qr_codes(conn)
 
         conn.execute(
             """
@@ -985,6 +1062,9 @@ def create_app():
             conn.close()
             return jsonify({"error": "Ca này đã được xác nhận đi làm"}), 400
 
+        now_raw = _format_db_datetime(now_dt)
+        _cleanup_one_time_qr_codes(conn)
+
         one_time_row = conn.execute(
             """
             SELECT id, expires_at
@@ -993,10 +1073,11 @@ def create_app():
               AND qr_token = ?
               AND one_time_code = ?
               AND consumed_at IS NULL
+              AND expires_at >= ?
             ORDER BY id DESC
             LIMIT 1
             """,
-            (branch_id, qr_token, one_time_code),
+            (branch_id, qr_token, one_time_code, now_raw),
         ).fetchone()
         if not one_time_row:
             conn.close()
@@ -1133,6 +1214,9 @@ def create_app():
             conn.close()
             return jsonify({"error": "Ban phai ket noi Wi-Fi chi nhanh de quet QR"}), 403
 
+        now_raw = _format_db_datetime(datetime.now())
+        _cleanup_one_time_qr_codes(conn)
+
         one_time_row = conn.execute(
             """
             SELECT id, expires_at
@@ -1141,10 +1225,11 @@ def create_app():
               AND qr_token = ?
               AND one_time_code = ?
               AND consumed_at IS NULL
+              AND expires_at >= ?
             ORDER BY id DESC
             LIMIT 1
             """,
-            (branch_id, qr_token, one_time_code),
+            (branch_id, qr_token, one_time_code, now_raw),
         ).fetchone()
         conn.close()
         if not one_time_row:
@@ -1979,6 +2064,7 @@ def create_app():
                    u.username,
                    u.display_name,
                    u.full_name,
+                     u.avatar_data_url,
                    u.phone_number,
                    u.address,
                    u.date_of_birth,
@@ -2012,6 +2098,7 @@ def create_app():
                      u.username,
                      u.display_name,
                      u.full_name,
+                     u.avatar_data_url,
                      u.phone_number,
                      u.address,
                      u.date_of_birth,
@@ -2112,6 +2199,81 @@ def create_app():
         conn.commit()
         conn.close()
         return jsonify({"message": "Employee account created", "employee_id": employee_id}), 201
+
+    @app.put("/api/manager/employees/<int:employee_id>")
+    def manager_update_employee(employee_id):
+        user, error = _get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        display_name = (body.get("display_name") or "").strip()
+        full_name = (body.get("full_name") or "").strip()
+        phone_number = (body.get("phone_number") or "").strip()
+        address = (body.get("address") or "").strip()
+        date_of_birth = (body.get("date_of_birth") or "").strip()
+        job_position = (body.get("job_position") or "").strip()
+
+        if not display_name:
+            return jsonify({"error": "Tên hiển thị không được để trống"}), 400
+        if not full_name:
+            return jsonify({"error": "Họ tên không được để trống"}), 400
+        if len(display_name) > 80:
+            return jsonify({"error": "Tên hiển thị quá dài"}), 400
+        if len(full_name) > 120:
+            return jsonify({"error": "Họ tên quá dài"}), 400
+        if phone_number and not re.fullmatch(r"\+?[0-9]{9,15}", phone_number):
+            return jsonify({"error": "Số điện thoại không hợp lệ"}), 400
+        if date_of_birth:
+            try:
+                datetime.strptime(date_of_birth, "%Y-%m-%d")
+            except ValueError:
+                return jsonify({"error": "Ngày sinh không đúng định dạng YYYY-MM-DD"}), 400
+        if len(address) > 255:
+            return jsonify({"error": "Địa chỉ quá dài"}), 400
+        if len(job_position) > 120:
+            return jsonify({"error": "Vị trí công việc quá dài"}), 400
+
+        conn = get_conn()
+        target = conn.execute(
+            "SELECT id, role FROM users WHERE id = ?",
+            (employee_id,),
+        ).fetchone()
+        if not target:
+            conn.close()
+            return jsonify({"error": "User not found"}), 404
+        if target["role"] != "employee":
+            conn.close()
+            return jsonify({"error": "Manager can only edit employee accounts"}), 400
+        if not _manager_can_manage_employee(conn, user["branch_id"], employee_id):
+            conn.close()
+            return jsonify({"error": "You can only edit employees in your branch scope"}), 403
+
+        conn.execute(
+            """
+            UPDATE users
+            SET display_name = ?,
+                full_name = ?,
+                phone_number = ?,
+                address = ?,
+                date_of_birth = ?,
+                job_position = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                display_name,
+                full_name,
+                phone_number or None,
+                address or None,
+                date_of_birth or None,
+                job_position or None,
+                employee_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Employee profile updated"})
 
     @app.delete("/api/manager/employees/<int:employee_id>")
     def manager_delete_employee(employee_id):
@@ -2573,6 +2735,8 @@ def create_app():
         network_ip = (body.get("network_ip") or "").strip() or None
         if not name:
             return jsonify({"error": "name is required"}), 400
+        if network_ip and not _is_valid_ipv4(network_ip):
+            return jsonify({"error": "network_ip must be a valid IPv4 address"}), 400
 
         conn = get_conn()
         exists = conn.execute("SELECT 1 FROM branches WHERE LOWER(name) = LOWER(?)", (name,)).fetchone()
@@ -2608,6 +2772,8 @@ def create_app():
         network_ip = (body.get("network_ip") or "").strip() or None
         if not name:
             return jsonify({"error": "name is required"}), 400
+        if network_ip and not _is_valid_ipv4(network_ip):
+            return jsonify({"error": "network_ip must be a valid IPv4 address"}), 400
 
         conn = get_conn()
         branch = conn.execute(

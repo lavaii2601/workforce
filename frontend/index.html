@@ -51,6 +51,38 @@
               </label>
             </div>
             <button id="btn-login" class="login-submit">Đăng nhập</button>
+            <button id="btn-open-change-password" class="ghost" type="button">Đi đến trang đổi mật khẩu</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="change-password-view" class="login-view hidden">
+      <div class="login-card login-card-compact">
+        <div class="login-layout one-column-layout">
+          <div class="login-hero">
+            <p class="badge">Workforce Hub</p>
+            <h1>Đổi mật khẩu tài khoản</h1>
+            <p class="muted">Sau khi đổi mật khẩu thành công, hệ thống sẽ quay về trang đăng nhập.</p>
+          </div>
+
+          <div class="login-form-wrap">
+            <div class="field-grid login-field-grid login-change-pass-grid">
+              <label>Tài khoản
+                <input id="change-password-username" type="text" placeholder="Nhập username" autocomplete="username" />
+              </label>
+              <label>Mật khẩu hiện tại
+                <input id="change-password-current" type="password" placeholder="Nhập mật khẩu hiện tại" autocomplete="current-password" />
+              </label>
+              <label>Mật khẩu mới
+                <input id="change-password-new" type="password" placeholder="Nhập mật khẩu mới (ít nhất 8 ký tự)" autocomplete="new-password" />
+              </label>
+              <label>Xác nhận mật khẩu mới
+                <input id="change-password-confirm" type="password" placeholder="Nhập lại mật khẩu mới" autocomplete="new-password" />
+              </label>
+            </div>
+            <button id="btn-change-password" class="login-submit" type="button">Đổi mật khẩu</button>
+            <button id="btn-back-login" class="ghost" type="button">Quay lại đăng nhập</button>
           </div>
         </div>
       </div>
@@ -227,6 +259,13 @@
             <button type="button" class="schedule-tab active" data-schedule-tab="preferences">Đăng ký nhân viên</button>
             <button type="button" class="schedule-tab" data-schedule-tab="assigned">Lịch đã phân</button>
             <button type="button" class="schedule-tab" data-schedule-tab="staffing">Định mức ca</button>
+          </div>
+          <div class="schedule-color-legend" aria-label="Chú thích màu lịch ca">
+            <span class="legend-item shift">Màu theo ca</span>
+            <span class="legend-item has-data">Ô có nhân sự</span>
+            <span class="legend-item in-range">Đủ định mức</span>
+            <span class="legend-item out-range">Lệch định mức</span>
+            <span class="legend-item empty">Ô trống</span>
           </div>
 
           <div id="manager-schedule-pane-preferences" class="schedule-pane active">

@@ -35,6 +35,10 @@ const managerEmployeeUiState = {
   keyword: "",
 };
 
+const authUiState = {
+  screen: "login",
+};
+
 const qrCameraState = {
   stream: null,
   detector: null,
@@ -250,7 +254,10 @@ function roleLabel(role) {
 
 function setShellByAuth() {
   const loggedIn = !!state.currentUser;
-  $("#login-view").classList.toggle("hidden", loggedIn);
+  const loginView = $("#login-view");
+  const changePasswordView = $("#change-password-view");
+  loginView.classList.toggle("hidden", loggedIn || authUiState.screen !== "login");
+  changePasswordView.classList.toggle("hidden", loggedIn || authUiState.screen !== "change-password");
   $("#app-view").classList.toggle("hidden", !loggedIn);
 
   if (!loggedIn) {
@@ -282,6 +289,13 @@ function setShellByAuth() {
   applySidebarState();
   toggleProfileRequiredModal(shouldRequireProfileCompletion());
   renderNav();
+}
+
+function switchAuthScreen(screen) {
+  authUiState.screen = screen === "change-password" ? "change-password" : "login";
+  if (!state.currentUser) {
+    setShellByAuth();
+  }
 }
 
 function shouldRequireProfileCompletion() {
@@ -683,16 +697,18 @@ async function loadMyAttendance(viewMode) {
   const target = viewMode === "manager" ? "#manager-attendance-list" : "#employee-attendance-list";
   const list = $(target);
   list.innerHTML = "";
+  const fragment = document.createDocumentFragment();
   data.items.forEach((item) => {
     const row = document.createElement("div");
     row.className = "list-item";
     row.innerHTML = `<span>${item.branch_name} | ${formatDateTimeDisplay(item.check_in_at)} -> ${item.check_out_at ? formatDateTimeDisplay(item.check_out_at) : "Đang làm"}</span><strong>${(item.minutes_worked / 60).toFixed(2)}h</strong>`;
-    list.appendChild(row);
+    fragment.appendChild(row);
   });
   const sum = document.createElement("div");
   sum.className = "list-item";
   sum.innerHTML = `<span>Tổng giờ trong tuần</span><strong>${(data.total_minutes / 60).toFixed(2)}h</strong>`;
-  list.appendChild(sum);
+  fragment.appendChild(sum);
+  list.appendChild(fragment);
 }
 
 async function generateManagerOneTimeQr() {
@@ -757,6 +773,7 @@ async function loadManagerShiftAttendanceToday() {
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   (payload.items || []).forEach((item) => {
     const row = document.createElement("div");
     row.className = `list-item shift-attendance-item ${shiftAttendanceStatusClass(item.status)}`;
@@ -776,8 +793,9 @@ async function loadManagerShiftAttendanceToday() {
         ${canOverride ? `<button class="ghost" data-override-shift="${item.schedule_id}">Đánh đã đi làm</button>` : ""}
       </div>
     `;
-    list.appendChild(row);
+    fragment.appendChild(row);
   });
+  list.appendChild(fragment);
 }
 
 async function scanEmployeeOneTimeQr() {
@@ -1147,13 +1165,15 @@ async function loadManagerSchedule() {
   `;
   const prefBody = prefBoard.querySelector("#manager-pref-week-body");
 
-  state.shifts.forEach((shift) => {
+  state.shifts.forEach((shift, shiftIndex) => {
     const row = document.createElement("tr");
+    row.className = `shift-row shift-idx-${shiftIndex % 6}`;
     const cells = weekDaysMeta()
       .map((meta) => {
         const rows = prefs.filter(
           (p) => p.shift_code === shift.code && expandDays(p.day_of_week).includes(meta.day)
         );
+        const cellClass = rows.length ? "has-data" : "is-empty";
         let content = `<span class="tt-empty">Không có đăng ký</span>`;
         if (rows.length) {
           content = rows
@@ -1164,7 +1184,7 @@ async function loadManagerSchedule() {
             })
             .join("");
         }
-        return `<td><div class="tt-content">${content}</div></td>`;
+        return `<td class="day-cell day-${meta.day} ${cellClass}"><div class="tt-content">${content}</div></td>`;
       })
       .join("");
 
@@ -1191,8 +1211,9 @@ async function loadManagerSchedule() {
   `;
   const scheduleBody = scheduleBoard.querySelector("#manager-schedule-week-body");
 
-  state.shifts.forEach((shift) => {
+  state.shifts.forEach((shift, shiftIndex) => {
     const row = document.createElement("tr");
+    row.className = `shift-row shift-idx-${shiftIndex % 6}`;
     const cells = weekDaysMeta()
       .map((meta) => {
         const rows = schedule.filter(
@@ -1201,11 +1222,11 @@ async function loadManagerSchedule() {
         const rule = managerStaffingRules.get(shift.code) || { min_staff: 3, max_staff: 4 };
         const count = rows.length;
         const outOfRange = count > 0 && (count < Number(rule.min_staff) || count > Number(rule.max_staff));
-        const badgeClass = outOfRange ? "staffing-count bad" : "staffing-count";
+        const cellClass = count === 0 ? "is-empty" : outOfRange ? "is-out-range" : "is-in-range";
         const content = rows.length
-          ? rows.map((item) => `<span class="tt-pill">${item.employee_name} - ${item.branch_name}</span>`).join("")
+          ? rows.map((item) => `<span class="tt-pill">${item.employee_name}</span>`).join("")
           : `<span class="tt-empty">Trống</span>`;
-        return `<td><div class="tt-content"><span class="${badgeClass}">${count}/${rule.min_staff}-${rule.max_staff}</span>${content}</div></td>`;
+        return `<td class="day-cell day-${meta.day} ${cellClass}"><div class="tt-content">${content}</div></td>`;
       })
       .join("");
 
@@ -1372,22 +1393,66 @@ async function loadManagerEmployees() {
     const birth = String(e.date_of_birth || "").trim();
     const branchNames = Array.isArray(e.branch_names) ? e.branch_names.join(", ") : "-";
     const row = document.createElement("div");
-    row.className = "list-item";
+    row.className = "list-item manager-employee-item";
     row.innerHTML = `
-      <div>
-        <strong>${escapeHtml(fullName)}</strong> (${escapeHtml(e.username)})<br />
-        <small>Tên hiển thị: ${escapeHtml(e.display_name)}</small><br />
-        <small>Vị trí: ${escapeHtml(position || "-")} | Ngày sinh: ${escapeHtml(birth || "-")}</small><br />
-        <small>Số điện thoại: ${escapeHtml(phone || "-")}</small><br />
-        <small>Địa chỉ: ${escapeHtml(address || "-")}</small><br />
-        <small>Chi nhánh: ${escapeHtml(branchNames || "-")}</small>
+      ${buildEmployeeAvatarHtml(e)}
+      <div class="manager-employee-content">
+        <div class="manager-employee-view">
+          <strong>${escapeHtml(fullName)}</strong> (${escapeHtml(e.username)})<br />
+          <small>Tên hiển thị: ${escapeHtml(e.display_name)}</small><br />
+          <small>Vị trí: ${escapeHtml(position || "-")} | Ngày sinh: ${escapeHtml(birth || "-")}</small><br />
+          <small>Số điện thoại: ${escapeHtml(phone || "-")}</small><br />
+          <small>Địa chỉ: ${escapeHtml(address || "-")}</small><br />
+          <small>Chi nhánh: ${escapeHtml(branchNames || "-")}</small>
+        </div>
+        <div class="manager-employee-edit hidden">
+          <div class="field-grid manager-employee-edit-grid">
+            <label>Tên hiển thị
+              <input type="text" data-edit-display-name value="${escapeHtml(e.display_name || "")}" />
+            </label>
+            <label>Họ tên
+              <input type="text" data-edit-full-name value="${escapeHtml(e.full_name || "")}" />
+            </label>
+            <label>Số điện thoại
+              <input type="text" data-edit-phone value="${escapeHtml(phone)}" placeholder="VD: 0901234567" />
+            </label>
+            <label>Ngày sinh
+              <input type="date" data-edit-dob value="${escapeHtml(birth)}" />
+            </label>
+            <label>Vị trí
+              <input type="text" data-edit-position value="${escapeHtml(position)}" />
+            </label>
+            <label>Địa chỉ
+              <input type="text" data-edit-address value="${escapeHtml(address)}" />
+            </label>
+          </div>
+          <small class="muted">Bắt buộc: Tên hiển thị, Họ tên. Có thể cập nhật ngay để tránh sai sót.</small>
+        </div>
       </div>
       <div class="row compact">
+        <button class="ghost" data-edit-emp="${e.id}">Sửa</button>
+        <button class="hidden" data-save-emp="${e.id}">Lưu</button>
+        <button class="ghost hidden" data-cancel-edit-emp="${e.id}">Hủy</button>
         <button class="danger" data-del-emp="${e.id}">Xóa</button>
       </div>
     `;
     list.appendChild(row);
   });
+}
+
+function validateManagerEmployeeUpdate(payload) {
+  if (!payload.display_name) {
+    throw new Error("Tên hiển thị không được để trống");
+  }
+  if (!payload.full_name) {
+    throw new Error("Họ tên không được để trống");
+  }
+  if (payload.phone_number && !/^\+?[0-9]{9,15}$/.test(payload.phone_number)) {
+    throw new Error("Số điện thoại không hợp lệ");
+  }
+  if (payload.date_of_birth && !/^\d{4}-\d{2}-\d{2}$/.test(payload.date_of_birth)) {
+    throw new Error("Ngày sinh phải theo định dạng YYYY-MM-DD");
+  }
 }
 
 function bindManagerEmployeeListEvents() {
@@ -1397,6 +1462,56 @@ function bindManagerEmployeeListEvents() {
   }
   list.dataset.bound = "true";
   list.addEventListener("click", async (event) => {
+    const row = event.target.closest(".manager-employee-item");
+    if (!row) return;
+
+    const editBtn = event.target.closest("button[data-edit-emp]");
+    if (editBtn) {
+      row.classList.add("is-editing");
+      row.querySelector(".manager-employee-view")?.classList.add("hidden");
+      row.querySelector(".manager-employee-edit")?.classList.remove("hidden");
+      row.querySelector("button[data-edit-emp]")?.classList.add("hidden");
+      row.querySelector("button[data-save-emp]")?.classList.remove("hidden");
+      row.querySelector("button[data-cancel-edit-emp]")?.classList.remove("hidden");
+      row.querySelector("input[data-edit-display-name]")?.focus();
+      return;
+    }
+
+    const cancelBtn = event.target.closest("button[data-cancel-edit-emp]");
+    if (cancelBtn) {
+      row.classList.remove("is-editing");
+      row.querySelector(".manager-employee-view")?.classList.remove("hidden");
+      row.querySelector(".manager-employee-edit")?.classList.add("hidden");
+      row.querySelector("button[data-edit-emp]")?.classList.remove("hidden");
+      row.querySelector("button[data-save-emp]")?.classList.add("hidden");
+      row.querySelector("button[data-cancel-edit-emp]")?.classList.add("hidden");
+      return;
+    }
+
+    const saveBtn = event.target.closest("button[data-save-emp]");
+    if (saveBtn) {
+      const id = Number(saveBtn.dataset.saveEmp);
+      if (!id) return;
+
+      const payload = {
+        display_name: String(row.querySelector("input[data-edit-display-name]")?.value || "").trim(),
+        full_name: String(row.querySelector("input[data-edit-full-name]")?.value || "").trim(),
+        phone_number: String(row.querySelector("input[data-edit-phone]")?.value || "").trim(),
+        date_of_birth: String(row.querySelector("input[data-edit-dob]")?.value || "").trim(),
+        job_position: String(row.querySelector("input[data-edit-position]")?.value || "").trim(),
+        address: String(row.querySelector("input[data-edit-address]")?.value || "").trim(),
+      };
+
+      validateManagerEmployeeUpdate(payload);
+      await api(`/api/manager/employees/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      showToast("Đã cập nhật thông tin nhân viên");
+      await loadManagerEmployees();
+      return;
+    }
+
     const btn = event.target.closest("button[data-del-emp]");
     if (!btn) return;
 
@@ -1428,6 +1543,25 @@ async function createEmployee() {
 
 function setManagerEmployeeKeyword(value) {
   managerEmployeeUiState.keyword = (value || "").trim();
+}
+
+function buildEmployeeAvatarHtml(employee) {
+  const fullName = String(employee.full_name || "").trim() || String(employee.display_name || "").trim();
+  const initials = (fullName || String(employee.username || "NV"))
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("")
+    .slice(0, 2) || "NV";
+
+  const avatarDataUrl = String(employee.avatar_data_url || "").trim();
+  if (!avatarDataUrl) {
+    return `<div class="manager-employee-avatar" aria-hidden="true">${escapeHtml(initials)}</div>`;
+  }
+
+  const safeDataUrl = avatarDataUrl.replace(/'/g, "%27");
+  return `<div class="manager-employee-avatar has-image" style="background-image:url('${safeDataUrl}')" aria-hidden="true"></div>`;
 }
 
 async function loadCeoChat() {
@@ -1558,18 +1692,36 @@ async function loadCeoBranches() {
 
   branches.forEach((branch) => {
     const row = document.createElement("div");
-    row.className = "list-item";
+    row.className = "list-item ceo-branch-item";
     row.innerHTML = `
-      <div>
-        <strong>${branch.name}</strong><br />
-        <small>${branch.location || "Khong co dia diem"}</small><br />
-        <small>Quan ly: ${branch.manager_count} | Nhan vien: ${branch.employee_count}</small>
+      <div class="ceo-branch-content">
+        <div class="ceo-branch-view">
+          <strong>${branch.name}</strong><br />
+          <small>Địa điểm: ${branch.location || "-"}</small><br />
+          <small>IP router: ${branch.network_ip || "-"}</small><br />
+          <small>Quản lý: ${branch.manager_count} | Nhân viên: ${branch.employee_count}</small>
+        </div>
+        <div class="ceo-branch-edit hidden">
+          <div class="field-grid ceo-branch-edit-grid">
+            <label>Tên chi nhánh
+              <input type="text" data-branch-name-input value="${escapeHtml(branch.name || "")}" />
+            </label>
+            <label>Địa điểm
+              <input type="text" data-branch-location-input value="${escapeHtml(branch.location || "")}" />
+            </label>
+            <label>IP router
+              <input type="text" data-branch-ip-input value="${escapeHtml(branch.network_ip || "")}" placeholder="VD: 203.113.10.20" />
+            </label>
+          </div>
+          <small class="muted">Có thể cập nhật trực tiếp để sửa sai thông tin chi nhánh.</small>
+        </div>
       </div>
       <div class="row compact">
-        <input class="branch-inline-input" type="text" data-branch-name="${branch.id}" data-branch-location="${branch.location || ""}" value="${branch.name}" />
-        <button data-branch-save="${branch.id}">Luu</button>
-        <button class="danger" data-branch-del="${branch.id}">Xoa</button>
-        <button class="ghost" data-branch-view="${branch.id}">Xem nhan vien</button>
+        <button class="ghost" data-branch-edit="${branch.id}">Sửa</button>
+        <button class="hidden" data-branch-save="${branch.id}">Lưu</button>
+        <button class="ghost hidden" data-branch-cancel="${branch.id}">Hủy</button>
+        <button class="danger" data-branch-del="${branch.id}">Xóa</button>
+        <button class="ghost" data-branch-view="${branch.id}">Xem nhân viên</button>
         <button class="ghost" data-branch-audit="${branch.id}">Audit</button>
       </div>
     `;
@@ -1586,26 +1738,53 @@ async function loadCeoBranches() {
         return;
       }
 
+      const row = target.closest(".ceo-branch-item");
+      if (!row) {
+        return;
+      }
+
+      if (target.dataset.branchEdit) {
+        row.classList.add("is-editing");
+        row.querySelector(".ceo-branch-view")?.classList.add("hidden");
+        row.querySelector(".ceo-branch-edit")?.classList.remove("hidden");
+        row.querySelector("button[data-branch-edit]")?.classList.add("hidden");
+        row.querySelector("button[data-branch-save]")?.classList.remove("hidden");
+        row.querySelector("button[data-branch-cancel]")?.classList.remove("hidden");
+        row.querySelector("input[data-branch-name-input]")?.focus();
+        return;
+      }
+
+      if (target.dataset.branchCancel) {
+        row.classList.remove("is-editing");
+        row.querySelector(".ceo-branch-view")?.classList.remove("hidden");
+        row.querySelector(".ceo-branch-edit")?.classList.add("hidden");
+        row.querySelector("button[data-branch-edit]")?.classList.remove("hidden");
+        row.querySelector("button[data-branch-save]")?.classList.add("hidden");
+        row.querySelector("button[data-branch-cancel]")?.classList.add("hidden");
+        return;
+      }
+
       if (target.dataset.branchSave) {
         const branchId = Number(target.dataset.branchSave);
-        const input = document.querySelector(`input[data-branch-name='${branchId}']`);
-        const name = input?.value.trim() || "";
-        const location = input?.dataset.branchLocation || "";
+        const name = String(row.querySelector("input[data-branch-name-input]")?.value || "").trim();
+        const location = String(row.querySelector("input[data-branch-location-input]")?.value || "").trim();
+        const network_ip = String(row.querySelector("input[data-branch-ip-input]")?.value || "").trim();
         if (!name) {
-          showToast("Ten chi nhanh khong duoc de trong", true);
+          showToast("Tên chi nhánh không được để trống", true);
+          return;
+        }
+        if (network_ip && !/^\d{1,3}(\.\d{1,3}){3}$/.test(network_ip)) {
+          showToast("IP router không hợp lệ", true);
           return;
         }
         await api(`/api/admin/branches/${branchId}`, {
           method: "PUT",
-          body: JSON.stringify({ name, location }),
+          body: JSON.stringify({ name, location, network_ip }),
         });
-        showToast("Da cap nhat chi nhanh");
+        showToast("Đã cập nhật chi nhánh");
         ceoBranchAuditState.branchId = branchId;
         ceoBranchAuditState.page = 1;
-        await refreshBranchesMeta();
-        loadCeoExportBranchOptions();
-        loadCeoUserBranchOptions();
-        await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
+        await refreshCeoBranchDependentViews();
         return;
       }
 
@@ -1618,10 +1797,7 @@ async function loadCeoBranches() {
         showToast("Da xoa chi nhanh");
         ceoBranchAuditState.branchId = null;
         ceoBranchAuditState.page = 1;
-        await refreshBranchesMeta();
-        loadCeoExportBranchOptions();
-        loadCeoUserBranchOptions();
-        await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
+        await refreshCeoBranchDependentViews();
         return;
       }
 
@@ -1641,6 +1817,13 @@ async function loadCeoBranches() {
     });
     list.dataset.bound = "true";
   }
+}
+
+async function refreshCeoBranchDependentViews() {
+  await refreshBranchesMeta();
+  loadCeoExportBranchOptions();
+  loadCeoUserBranchOptions();
+  await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
 }
 
 async function loadBranchEmployeesByCeo(branchId) {
@@ -1808,20 +1991,19 @@ async function loadCeoUsers() {
 async function createBranchByCeo() {
   const name = $("#ceo-branch-new-name").value.trim();
   const location = $("#ceo-branch-new-location").value.trim();
+  const network_ip = $("#ceo-branch-new-network-ip").value.trim();
   await api("/api/admin/branches", {
     method: "POST",
-    body: JSON.stringify({ name, location }),
+    body: JSON.stringify({ name, location, network_ip }),
   });
   $("#ceo-branch-new-name").value = "";
   $("#ceo-branch-new-location").value = "";
+  $("#ceo-branch-new-network-ip").value = "";
   showToast("Da them chi nhanh moi");
   ceoBranchState.page = 1;
   ceoBranchAuditState.page = 1;
   ceoBranchAuditState.branchId = null;
-  await refreshBranchesMeta();
-  loadCeoExportBranchOptions();
-  loadCeoUserBranchOptions();
-  await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
+  await refreshCeoBranchDependentViews();
 }
 
 async function login() {
@@ -1846,6 +2028,46 @@ async function login() {
   if (state.currentUser.role === "employee") await loadEmployeeBranches();
   await renderRoute();
   showToast("Dang nhap thanh cong");
+}
+
+async function changePasswordFromLogin() {
+  const username = $("#change-password-username").value.trim();
+  const currentPassword = $("#change-password-current").value;
+  const newPassword = $("#change-password-new").value;
+  const confirmPassword = $("#change-password-confirm").value;
+
+  if (!username) {
+    throw new Error("Vui lòng nhập tài khoản");
+  }
+  if (!currentPassword) {
+    throw new Error("Vui lòng nhập mật khẩu hiện tại");
+  }
+  if (!newPassword) {
+    throw new Error("Vui lòng nhập mật khẩu mới");
+  }
+  if (newPassword.length < 8) {
+    throw new Error("Mật khẩu mới phải có ít nhất 8 ký tự");
+  }
+  if (newPassword !== confirmPassword) {
+    throw new Error("Xác nhận mật khẩu mới không khớp");
+  }
+
+  await api("/api/change-password-login", {
+    method: "POST",
+    body: JSON.stringify({
+      username,
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+
+  $("#change-password-current").value = "";
+  $("#change-password-new").value = "";
+  $("#change-password-confirm").value = "";
+  $("#login-username").value = username;
+  $("#login-password").value = "";
+  switchAuthScreen("login");
+  showToast("Đổi mật khẩu thành công, vui lòng đăng nhập lại");
 }
 
 async function logout() {
@@ -1903,6 +2125,23 @@ function attachEvents() {
       isHidden ? "An mat khau" : "Hien mat khau"
     );
     input.focus();
+  });
+  $("#btn-open-change-password").addEventListener("click", () => {
+    $("#change-password-username").value = $("#login-username").value.trim();
+    switchAuthScreen("change-password");
+    $("#change-password-current").focus();
+  });
+  $("#btn-back-login").addEventListener("click", () => {
+    switchAuthScreen("login");
+    $("#login-password").focus();
+  });
+  $("#btn-change-password").addEventListener("click", () =>
+    changePasswordFromLogin().catch((e) => showToast(e.message, true))
+  );
+  $("#change-password-confirm").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      changePasswordFromLogin().catch((e) => showToast(e.message, true));
+    }
   });
   $("#btn-logout").addEventListener("click", () => logout().catch((e) => showToast(e.message, true)));
   $("#btn-save-profile-required").addEventListener("click", () =>

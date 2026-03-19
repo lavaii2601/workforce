@@ -190,6 +190,48 @@ body.no-scroll {
   min-height: 46px;
 }
 
+.login-card-compact {
+  width: min(560px, 95vw);
+}
+
+.one-column-layout {
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #3a4f45;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(21, 33, 29, 0.2);
+}
+
+.login-divider span {
+  white-space: nowrap;
+}
+
+.login-change-pass-grid {
+  padding: 10px;
+  border: 1px dashed rgba(21, 33, 29, 0.28);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+#btn-change-password {
+  width: 100%;
+  min-height: 42px;
+}
+
 .app-view {
   display: block;
   position: relative;
@@ -703,6 +745,101 @@ body.no-scroll {
   color: #8f2327;
 }
 
+#route-manager-schedule .schedule-color-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+#route-manager-schedule .schedule-color-legend .legend-item {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  border: 1px solid rgba(21, 33, 29, 0.2);
+  background: #fff;
+}
+
+#route-manager-schedule .schedule-color-legend .legend-item.shift {
+  background: linear-gradient(120deg, rgba(14, 125, 87, 0.15), rgba(255, 138, 59, 0.18));
+}
+
+#route-manager-schedule .schedule-color-legend .legend-item.has-data {
+  background: rgba(27, 134, 92, 0.12);
+}
+
+#route-manager-schedule .schedule-color-legend .legend-item.in-range {
+  background: rgba(27, 134, 92, 0.16);
+}
+
+#route-manager-schedule .schedule-color-legend .legend-item.out-range {
+  background: rgba(186, 47, 53, 0.14);
+}
+
+#route-manager-schedule .schedule-color-legend .legend-item.empty {
+  background: rgba(120, 132, 126, 0.14);
+}
+
+#route-manager-schedule .shift-row > th.week-shift-col {
+  border-left: 6px solid transparent;
+}
+
+#route-manager-schedule .shift-row.shift-idx-0 > th.week-shift-col {
+  border-left-color: #2f855a;
+  background: rgba(47, 133, 90, 0.11);
+}
+
+#route-manager-schedule .shift-row.shift-idx-1 > th.week-shift-col {
+  border-left-color: #2b6cb0;
+  background: rgba(43, 108, 176, 0.11);
+}
+
+#route-manager-schedule .shift-row.shift-idx-2 > th.week-shift-col {
+  border-left-color: #b7791f;
+  background: rgba(183, 121, 31, 0.12);
+}
+
+#route-manager-schedule .shift-row.shift-idx-3 > th.week-shift-col {
+  border-left-color: #9f3a78;
+  background: rgba(159, 58, 120, 0.11);
+}
+
+#route-manager-schedule .shift-row.shift-idx-4 > th.week-shift-col {
+  border-left-color: #2c7a7b;
+  background: rgba(44, 122, 123, 0.11);
+}
+
+#route-manager-schedule .shift-row.shift-idx-5 > th.week-shift-col {
+  border-left-color: #975a16;
+  background: rgba(151, 90, 22, 0.11);
+}
+
+#route-manager-schedule td.day-cell.day-1 { background: rgba(229, 244, 236, 0.45); }
+#route-manager-schedule td.day-cell.day-2 { background: rgba(232, 240, 252, 0.46); }
+#route-manager-schedule td.day-cell.day-3 { background: rgba(245, 238, 252, 0.46); }
+#route-manager-schedule td.day-cell.day-4 { background: rgba(255, 244, 227, 0.46); }
+#route-manager-schedule td.day-cell.day-5 { background: rgba(228, 247, 249, 0.45); }
+#route-manager-schedule td.day-cell.day-6 { background: rgba(255, 236, 241, 0.45); }
+#route-manager-schedule td.day-cell.day-7 { background: rgba(238, 241, 243, 0.45); }
+
+#route-manager-schedule td.day-cell.has-data {
+  box-shadow: inset 0 0 0 2px rgba(14, 125, 87, 0.15);
+}
+
+#route-manager-schedule td.day-cell.is-empty {
+  filter: saturate(0.75);
+}
+
+#route-manager-schedule td.day-cell.is-in-range {
+  box-shadow: inset 0 0 0 2px rgba(27, 134, 92, 0.26);
+}
+
+#route-manager-schedule td.day-cell.is-out-range {
+  box-shadow: inset 0 0 0 2px rgba(186, 47, 53, 0.28);
+}
+
 .tt-empty {
   color: rgba(21, 33, 29, 0.68);
 }
@@ -913,6 +1050,71 @@ button.danger {
   border: 2px solid rgba(21, 33, 29, 0.34);
 }
 
+#route-manager-employees .manager-employee-item {
+  display: grid;
+  grid-template-columns: 122px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+}
+
+.manager-employee-avatar {
+  width: 108px;
+  height: 108px;
+  border-radius: 18px;
+  border: 2px solid rgba(21, 33, 29, 0.25);
+  background: linear-gradient(160deg, #f6fff8 0%, #deefe2 100%);
+  color: #1f4032;
+  font-weight: 700;
+  font-size: 1rem;
+  display: grid;
+  place-items: center;
+  justify-self: center;
+  overflow: hidden;
+  background-size: cover;
+  background-position: center;
+}
+
+.manager-employee-avatar.has-image {
+  color: transparent;
+}
+
+.manager-employee-content {
+  min-width: 0;
+  line-height: 1.45;
+}
+
+#route-manager-employees .manager-employee-view {
+  display: block;
+}
+
+#route-manager-employees .manager-employee-edit {
+  display: block;
+}
+
+#route-manager-employees .manager-employee-edit-grid {
+  margin-bottom: 6px;
+  gap: 8px;
+}
+
+#route-manager-employees .manager-employee-edit-grid label {
+  font-size: 0.88rem;
+}
+
+#route-manager-employees .manager-employee-edit-grid input {
+  padding: 8px 10px;
+  border-radius: 9px;
+}
+
+#route-manager-employees .manager-employee-item.is-editing {
+  background: rgba(255, 252, 239, 0.9);
+  border-color: rgba(179, 124, 24, 0.38);
+}
+
+#route-manager-employees .manager-employee-item .row.compact {
+  align-self: center;
+}
+
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -1087,6 +1289,33 @@ button.danger {
   min-width: 190px;
 }
 
+.ceo-branch-item {
+  align-items: stretch;
+}
+
+.ceo-branch-content {
+  min-width: 0;
+}
+
+.ceo-branch-edit-grid {
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.ceo-branch-edit-grid label {
+  font-size: 0.88rem;
+}
+
+.ceo-branch-edit-grid input {
+  padding: 8px 10px;
+  border-radius: 9px;
+}
+
+.ceo-branch-item.is-editing {
+  background: rgba(255, 252, 239, 0.9);
+  border-color: rgba(179, 124, 24, 0.38);
+}
+
 #manager-new-branches {
   min-height: 110px;
 }
@@ -1251,6 +1480,15 @@ button,
   .chat-compose-row {
     padding: 8px;
   }
+
+  #route-manager-employees .manager-employee-item {
+    grid-template-columns: 96px minmax(0, 1fr) auto;
+  }
+
+  .manager-employee-avatar {
+    width: 82px;
+    height: 82px;
+  }
 }
 
 @media (max-width: 480px) {
@@ -1268,5 +1506,21 @@ button,
   .login-point {
     width: 100%;
     justify-content: center;
+  }
+
+  #route-manager-employees .manager-employee-item {
+    grid-template-columns: 82px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  #route-manager-employees .manager-employee-item .row.compact {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .manager-employee-avatar {
+    width: 70px;
+    height: 70px;
+    border-radius: 14px;
   }
 }
