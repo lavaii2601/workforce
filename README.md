@@ -1,0 +1,117 @@
+# Workforce Manager (Mobile + Web)
+
+Ung dung quan ly nhan cong da chi nhanh, co the dung tren web va mobile browser.
+
+## Tinh nang da lam
+
+- Nhan vien dang ky ca lam cho tuan toi (co the dang ky nhieu chi nhanh).
+- Quan ly chi nhanh xem danh sach dang ky va phan lich tuan.
+- Dang nhap co mat khau + token session.
+- Phan quyen theo role va trang quan tri role/active cho CEO.
+- He thong chatbox tong danh rieng cho CEO, tich hop OpenJarvis de loc nhan vien bat thuong.
+- Cua hang truong co the cap tai khoan nhan vien moi va xoa tai khoan nhan vien khi nghi viec.
+- Da tao file placeholder cho he thong cham cong: `backend/services/timekeeping_service.py`.
+- Giao dien dashboard hien dai, chuyen trang theo vai tro sau khi dang nhap.
+- Cham cong, bao cao van de, va luong thong tin cap cao cho CEO.
+- Xuat CSV tong gio lam trong tuan de gui phong nhan su.
+
+## 4 ca co dinh
+
+- S1: 07:00 - 11:00
+- S2: 11:00 - 15:00
+- S3: 15:00 - 19:00
+- S4: 19:00 - 22:00
+
+## Tai khoan khoi tao mac dinh
+
+- CEO: `ceo`
+- Mat khau mac dinh: `123456`
+
+He thong khong seed chi nhanh, quan ly, hoac nhan vien mac dinh.
+CEO dang nhap lan dau de tu tao thong tin doanh nghiep.
+
+## Chay local
+
+### Cach nhanh (1 lenh quickstart)
+
+```bash
+cd workforce-manager
+python quickstart.py
+```
+
+Hoac tren Windows:
+
+```powershell
+.\quickstart.ps1
+```
+
+```bat
+quickstart.bat
+```
+
+Lenh quickstart se tu dong tao `.venv`, cai dependencies, va chay app local.
+
+```bash
+cd workforce-manager
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python start.py
+```
+
+Mo trinh duyet: `http://127.0.0.1:5000`
+
+## Kien truc nhanh
+
+- Backend: Flask + SQLite (`data.db`) + REST API.
+- Frontend: HTML/CSS/JS responsive (mobile-first).
+- Auth demo: chon user va dang nhap qua API `/api/login`.
+
+## API chinh
+
+- `POST /api/login`
+- `POST /api/logout`
+- `POST /api/change-password`
+- `GET /api/meta`
+- `GET /api/employee/branches`
+- `GET/PUT /api/employee/preferences`
+- `GET/PUT /api/manager/schedule`
+- `GET /api/manager/preferences`
+- `GET/POST /api/manager/employees`
+	- Ho tro `GET /api/manager/employees?q=<tu_khoa>` de tim theo ten, username, so dien thoai.
+- `DELETE /api/manager/employees/<id>`
+- `POST /api/attendance/check-in`
+- `POST /api/attendance/check-in-qr-one-time`
+- `POST /api/attendance/scan-qr-one-time`
+- `POST /api/attendance/check-out`
+- `GET /api/attendance/my-week`
+- `POST /api/manager/attendance-qr-one-time`
+- `GET /api/manager/attendance-shifts/today`
+- `PUT /api/manager/attendance-shifts/override`
+- `POST /api/issues`
+- `GET /api/issues/my`
+- `GET /api/manager/issues`
+- `PUT /api/manager/issues/<id>`
+- `GET /api/manager/payroll-export.csv`
+- `GET /api/manager/self-preferences`
+- `PUT /api/manager/self-preferences`
+- `GET/POST /api/ceo/chat`
+- `GET /api/ceo/issues`
+- `GET /api/ceo/payroll-export.csv`
+- `GET /api/admin/users`
+- `PUT /api/admin/users/<id>`
+
+## Quy tắc chấm công one-time mới
+
+- QR one-time hết hạn vào 24h00 (cuối ngày hiện tại theo thời gian server).
+- Nhân viên được check-in từ trước ca đến trễ tối đa 15 phút sau giờ bắt đầu ca.
+- Quá 15 phút: hệ thống tự đánh vắng cho ca đó và từ chối check-in.
+- Quản lý có thể vào màn chấm công để sửa trạng thái sang `đã đi làm` khi có bằng chứng hợp lệ.
+
+## OpenJarvis trong chat CEO
+
+- Khi CEO nhap cau co tu khoa nhu `jarvis`, `bat thuong`, `nghi`, he thong se tao them 1 tin phan hoi tu OpenJarvis.
+- OpenJarvis hien tai phan tich tren du lieu `weekly_schedule`:
+	- Nhan vien gio thap (< 12 gio/tuan).
+	- Nhan vien nghi lien tiep >= 2 tuan gan nhat.
+- Bao cao se chinh xac hon sau khi module cham cong duoc cap nhat du lieu check-in/check-out.

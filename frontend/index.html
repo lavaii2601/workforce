@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0e7d57" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>Workforce Hub</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="/icons/icon-192.svg" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="backdrop"></div>
+
+  <main class="shell">
+    <section id="login-view" class="login-view">
+      <div class="login-card">
+        <div class="login-layout">
+          <div class="login-hero">
+            <p class="badge">Workforce Hub</p>
+            <h1>Quản lý nhân công đa chi nhánh</h1>
+            <p class="muted">Đăng nhập để CEO cấu hình doanh nghiệp hoặc quản lý vận hành theo quyền truy cập.</p>
+            <div class="login-points">
+              <span class="login-point">Theo dõi chấm công</span>
+              <span class="login-point">Phân ca theo chi nhánh</span>
+              <span class="login-point">Quản trị nhân sự tập trung</span>
+            </div>
+          </div>
+
+          <div class="login-form-wrap">
+            <div class="field-grid login-field-grid">
+              <label>Tài khoản
+                <div class="input-with-icon">
+                  <span class="input-icon" aria-hidden="true">ID</span>
+                  <input id="login-username" type="text" placeholder="Nhập username" autocomplete="username" />
+                </div>
+              </label>
+              <label>Mật khẩu
+                <div class="input-with-icon password-wrap">
+                  <span class="input-icon" aria-hidden="true">PW</span>
+                  <input id="login-password" type="password" placeholder="Nhập mật khẩu" autocomplete="current-password" />
+                  <button id="btn-toggle-password" class="ghost password-toggle" type="button" aria-label="Hien mat khau">Hien</button>
+                </div>
+              </label>
+            </div>
+            <button id="btn-login" class="login-submit">Đăng nhập</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="app-view" class="app-view hidden">
+      <button id="btn-sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Mo menu">
+        <span class="sidebar-toggle-bars" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </span>
+      </button>
+
+      <aside id="app-sidebar" class="sidebar">
+        <div class="user-card">
+          <div id="sidebar-avatar" class="avatar-box">U</div>
+          <div>
+            <p class="badge">Dashboard</p>
+            <h2 id="sidebar-role">ROLE</h2>
+            <p id="sidebar-user" class="muted"></p>
+          </div>
+        </div>
+        <nav id="nav-links" class="nav-links"></nav>
+        <button id="btn-logout" class="ghost">Đăng xuất</button>
+      </aside>
+
+      <div id="sidebar-overlay" class="sidebar-overlay hidden" aria-hidden="true"></div>
+
+      <section id="profile-required-modal" class="profile-required hidden" aria-live="polite">
+        <div class="profile-required-card">
+          <h3>Hoàn thiện hồ sơ cá nhân</h3>
+          <p class="muted">Bạn cần cập nhật thông tin cá nhân trước khi sử dụng hệ thống.</p>
+
+          <div class="profile-avatar-wrap">
+            <img id="profile-avatar-preview" class="profile-avatar-preview hidden" alt="Avatar" />
+            <div id="profile-avatar-fallback" class="profile-avatar-fallback">AVT</div>
+            <input id="profile-avatar-input" type="file" accept="image/*" />
+          </div>
+
+          <div class="field-grid">
+            <label>Họ tên
+              <input id="profile-full-name" type="text" placeholder="VD: Nguyen Van A" />
+            </label>
+            <label>Ngày sinh
+              <input id="profile-dob" type="date" />
+            </label>
+            <label>Số điện thoại
+              <input id="profile-phone" type="tel" placeholder="VD: 0901234567" />
+            </label>
+            <label>Địa chỉ
+              <input id="profile-address" type="text" placeholder="VD: 123 Nguyen Trai, Q1, TP.HCM" />
+            </label>
+          </div>
+
+          <div class="row compact">
+            <button id="btn-save-profile-required">Lưu hồ sơ</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="content">
+        <header class="content-head">
+          <h2 id="page-title">Tổng quan</h2>
+          <div class="row compact">
+            <label>Tuần bắt đầu:
+              <input id="week-start" type="date" />
+            </label>
+            <button id="btn-week-refresh">Tải dữ liệu tuần</button>
+          </div>
+        </header>
+
+        <div id="route-employee-attendance" class="panel route-view hidden">
+          <h3>Nhân viên - Chấm công</h3>
+          <div class="row">
+            <input id="attendance-note" type="text" placeholder="Ghi chú (tùy chọn)" />
+            <button id="btn-check-out" class="ghost">Check-out</button>
+          </div>
+          <div class="row">
+            <input id="employee-one-time-qr-payload" type="text" placeholder="Dán nội dung QR sau khi quét" />
+            <button id="btn-scan-one-time-qr" class="ghost">Quét QR lấy key</button>
+          </div>
+          <div class="row">
+            <button id="btn-toggle-employee-qr-camera" class="ghost">Bật camera quét QR</button>
+            <span id="employee-qr-camera-status" class="muted">Camera đang tắt.</span>
+          </div>
+          <div id="employee-qr-camera-wrap" class="qr-camera-wrap hidden">
+            <video id="employee-qr-camera-preview" class="qr-camera-preview" autoplay playsinline muted></video>
+          </div>
+          <div class="row">
+            <input id="employee-one-time-random-key" type="text" placeholder="Nhập random key one-time để bắt đầu chấm công" />
+            <button id="btn-check-in-one-time" class="ghost">Xác nhận bắt đầu chấm công</button>
+          </div>
+          <p id="employee-one-time-scan-result" class="muted"></p>
+          <p class="muted">Phương án mới: Nhân viên phải kết nối Wi-Fi chi nhánh, quét QR để lấy random key, sau đó nhập key để bắt đầu chấm công.</p>
+          <div id="employee-attendance-list" class="list"></div>
+        </div>
+
+        <div id="route-employee-shifts" class="panel route-view hidden">
+          <h3>Nhân viên - Chọn ca làm trong tuần</h3>
+          <div id="employee-shift-grid" class="list"></div>
+          <button id="btn-save-employee-shifts">Lưu đăng ký ca</button>
+        </div>
+
+        <div id="route-employee-assigned" class="panel route-view hidden">
+          <h3>Nhân viên - Lịch đã được sắp xếp</h3>
+          <p class="muted">Lịch chính thức do quản lý xếp cho tuần đã chọn.</p>
+          <div class="row compact">
+            <label>Lọc theo chi nhánh
+              <select id="employee-assigned-branch-filter"></select>
+            </label>
+          </div>
+          <div id="employee-assigned-list" class="list"></div>
+        </div>
+
+        <div id="route-employee-issues" class="panel route-view hidden">
+          <h3>Nhân viên - Báo cáo vấn đề</h3>
+          <div class="field-grid">
+            <label>Tiêu đề
+              <input id="employee-issue-title" type="text" />
+            </label>
+            <label>Chi nhánh
+              <select id="employee-issue-branch"></select>
+            </label>
+          </div>
+          <label>Nội dung
+            <textarea id="employee-issue-details" rows="4"></textarea>
+          </label>
+          <button id="btn-submit-employee-issue">Gửi báo cáo</button>
+          <div class="row compact">
+            <label>Lọc danh sách theo chi nhánh
+              <select id="employee-issue-branch-filter"></select>
+            </label>
+          </div>
+          <div id="employee-issues-list" class="list"></div>
+        </div>
+
+        <div id="route-manager-attendance" class="panel route-view hidden">
+          <h3>Quản lý - Chấm công</h3>
+          <div class="row">
+            <input id="manager-attendance-note" type="text" placeholder="Ghi chú" />
+            <button id="btn-manager-check-in">Check-in</button>
+            <button id="btn-manager-check-out" class="ghost">Check-out</button>
+          </div>
+          <div class="schedule-col compact">
+            <h4>QR chấm công one-time</h4>
+            <p class="muted">Dùng một phương thức duy nhất: nhân viên quét QR để lấy key one-time rồi nhập key bắt đầu chấm công.</p>
+            <div class="row qr-image-row">
+              <img id="manager-attendance-one-time-qr-image" class="qr-image hidden" alt="QR one-time chấm công" />
+            </div>
+            <div class="row">
+              <button id="btn-manager-generate-one-time-qr" class="ghost">Tao QR One-time</button>
+            </div>
+            <p id="manager-attendance-one-time-meta" class="muted"></p>
+          </div>
+          <div class="schedule-col compact">
+            <h4>Theo dõi vào ca hôm nay</h4>
+            <p class="muted">Nếu nhân viên đi làm đúng giờ nhưng quên chấm công, quản lý có thể cập nhật lại trạng thái.</p>
+            <div id="manager-shift-attendance-list" class="list"></div>
+          </div>
+          <div id="manager-attendance-list" class="list"></div>
+        </div>
+
+        <div id="route-manager-self-shifts" class="panel route-view hidden">
+          <h3>Quản lý - Chọn ca làm cả tuần (dạng bảng)</h3>
+          <p class="muted">Đăng ký theo từng ca và áp dụng cho toàn bộ tuần đã chọn.</p>
+          <div id="manager-self-shifts-list" class="chips"></div>
+          <button id="btn-save-manager-self-shifts">Lưu ca của tôi</button>
+        </div>
+
+        <div id="route-manager-schedule" class="panel route-view hidden">
+          <h3>Quản lý - Sắp xếp ca nhân viên</h3>
+          <div id="manager-schedule-tabs" class="schedule-tabs">
+            <button type="button" class="schedule-tab active" data-schedule-tab="preferences">Đăng ký nhân viên</button>
+            <button type="button" class="schedule-tab" data-schedule-tab="assigned">Lịch đã phân</button>
+            <button type="button" class="schedule-tab" data-schedule-tab="staffing">Định mức ca</button>
+          </div>
+
+          <div id="manager-schedule-pane-preferences" class="schedule-pane active">
+            <div class="schedule-col compact">
+              <h4>Đăng ký nhân viên</h4>
+              <p class="muted">Tick chọn nhanh theo tuần để xếp lịch gọn hơn.</p>
+              <div id="manager-preferences" class="list"></div>
+            </div>
+          </div>
+
+          <div id="manager-schedule-pane-assigned" class="schedule-pane hidden">
+            <div class="schedule-col compact">
+              <h4>Lịch đã phân theo ca</h4>
+              <p class="muted">Bảng tổng hợp nhân sự đã được phân cho từng ca.</p>
+              <div id="manager-schedule" class="list"></div>
+              <button id="btn-save-manager-schedule">Lưu lịch tuần</button>
+            </div>
+          </div>
+
+          <div id="manager-schedule-pane-staffing" class="schedule-pane hidden">
+            <div class="schedule-col compact">
+              <h4>Định mức nhân sự theo ca</h4>
+              <p class="muted">Thiết lập số lượng tối thiểu/tối đa cho mỗi ca trong 1 ngày.</p>
+              <div id="manager-staffing-rules" class="list"></div>
+              <button id="btn-save-manager-staffing-rules" class="ghost">Lưu định mức</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="route-manager-issues" class="panel route-view hidden">
+          <h3>Quản lý - Tiếp nhận và báo cáo cấp cao</h3>
+          <div id="manager-issues-list" class="list"></div>
+        </div>
+
+        <div id="route-manager-employees" class="panel route-view hidden">
+          <h3>Quản lý - Thêm nhân viên mới và xem thông tin cá nhân</h3>
+          <div class="field-grid manager-employee-form">
+            <label>Tên đăng nhập
+              <input id="manager-new-username" type="text" />
+            </label>
+            <label>Tên hiển thị
+              <input id="manager-new-name" type="text" />
+            </label>
+            <label>Mật khẩu
+              <input id="manager-new-password" type="password" />
+            </label>
+            <label>Phân vùng chi nhánh cho nhân viên
+              <select id="manager-new-branches" multiple size="4"></select>
+            </label>
+          </div>
+          <button id="btn-create-employee">Tạo tài khoản</button>
+          <div class="row compact manager-employee-search-row">
+            <input id="manager-employee-search" type="text" placeholder="Tìm theo tên, tài khoản, số điện thoại" />
+            <button id="btn-manager-employee-search" class="ghost">Tìm nhân viên</button>
+            <button id="btn-manager-employee-reset" class="ghost">Xóa lọc</button>
+          </div>
+          <div id="manager-employees-list" class="list"></div>
+        </div>
+
+        <div id="route-manager-export" class="panel route-view hidden">
+          <h3>Quản lý - Xuất CSV giờ làm tuần</h3>
+          <p class="muted">Xem trước dữ liệu trên web, hoặc tải CSV để gửi phòng nhân sự tính lương.</p>
+          <div class="row compact">
+            <button id="btn-manager-preview-csv" class="ghost">Xem trước CSV</button>
+            <button id="btn-manager-export-csv">Tải CSV tuần này</button>
+          </div>
+          <div id="manager-export-preview" class="csv-preview hidden"></div>
+        </div>
+
+        <div id="route-ceo-chat" class="panel route-view hidden chat-panel">
+          <h3>CEO - Chat tổng hợp</h3>
+          <p class="muted">Tro ly tong hop gio lam, bao cao van de, bat thuong nhan su va de xuat xu ly.</p>
+          <div class="quick-prompts">
+            <button class="ghost" data-chat-prompt="Tong hop tat ca bat thuong trong tuan nay">Bat thuong</button>
+            <button class="ghost" data-chat-prompt="Tom tat nhan su nghi nhieu tuan">Nghi nhieu tuan</button>
+            <button class="ghost" data-chat-prompt="Tong hop van de can CEO xu ly">Van de cap cao</button>
+          </div>
+          <div class="chat-frame">
+            <div id="ceo-chat-log" class="chat-log"></div>
+            <div class="row chat-compose-row">
+              <input id="ceo-chat-input" type="text" placeholder="VD: Tong hop bat thuong nhan su trong tuan" />
+              <button id="btn-ceo-chat-send">Gui</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="route-ceo-issues" class="panel route-view hidden">
+          <h3>CEO - Báo cáo cấp cao</h3>
+          <div id="ceo-issues-list" class="list"></div>
+        </div>
+
+        <div id="route-ceo-export" class="panel route-view hidden">
+          <h3>CEO - Xuất CSV toàn hệ thống</h3>
+          <div class="row compact">
+            <label>Phạm vi chi nhánh
+              <select id="ceo-export-branch-filter"></select>
+            </label>
+          </div>
+          <div class="row compact">
+            <button id="btn-ceo-preview-csv" class="ghost">Xem trước CSV</button>
+            <button id="btn-ceo-export-csv">Tải CSV tuần này</button>
+          </div>
+          <div id="ceo-export-preview" class="csv-preview hidden"></div>
+        </div>
+
+        <div id="route-ceo-branches" class="panel route-view hidden">
+          <h3>CEO - Quản lý chi nhánh</h3>
+          <div class="task-switch-menu">
+            <button class="ghost task-switch-item active" data-route-link="ceo-branches" type="button">Quản lí chi nhánh</button>
+            <button class="ghost task-switch-item" data-route-link="ceo-users" type="button">Tạo tài khoản nhân sự</button>
+          </div>
+          <div class="row compact">
+            <input id="ceo-branch-search" type="text" placeholder="Tìm chi nhánh..." />
+            <button id="btn-ceo-branch-search" class="ghost">Tìm</button>
+          </div>
+          <div class="field-grid">
+            <label>Tên chi nhánh mới
+              <input id="ceo-branch-new-name" type="text" placeholder="VD: Chi nhánh Gò Vấp" />
+            </label>
+            <label>Địa điểm
+              <input id="ceo-branch-new-location" type="text" placeholder="VD: 21 Quang Trung, Gò Vấp" />
+            </label>
+            <label>IP router chi nhánh
+              <input id="ceo-branch-new-network-ip" type="text" placeholder="VD: 203.113.10.20" />
+            </label>
+            <label>&nbsp;
+              <button id="btn-ceo-create-branch">Thêm chi nhánh</button>
+            </label>
+          </div>
+          <div id="ceo-branches-list" class="list"></div>
+          <h4>Danh sách quản lí và nhân viên theo chi nhánh</h4>
+          <div id="ceo-branch-employees-list" class="list"></div>
+
+          <div class="row compact pagination-row">
+            <button id="btn-ceo-branches-prev" class="ghost">Trang trước</button>
+            <span id="ceo-branches-page" class="muted"></span>
+            <button id="btn-ceo-branches-next" class="ghost">Trang sau</button>
+          </div>
+
+          <h4>Lịch sử thao tác chi nhánh</h4>
+          <div id="ceo-branch-audit-list" class="list"></div>
+          <div class="row compact pagination-row">
+            <button id="btn-ceo-audit-prev" class="ghost">Trang trước</button>
+            <span id="ceo-audit-page" class="muted"></span>
+            <button id="btn-ceo-audit-next" class="ghost">Trang sau</button>
+          </div>
+        </div>
+
+        <div id="route-ceo-users" class="panel route-view hidden">
+          <h3>CEO - Tạo tài khoản nhân sự</h3>
+          <div class="task-switch-menu">
+            <button class="ghost task-switch-item" data-route-link="ceo-branches" type="button">Quản lí chi nhánh</button>
+            <button class="ghost task-switch-item active" data-route-link="ceo-users" type="button">Tạo tài khoản nhân sự</button>
+          </div>
+
+          <div class="field-grid">
+            <label>Chức vụ
+              <select id="ceo-new-user-role">
+                <option value="employee">Nhân viên thường</option>
+                <option value="manager">Quản lí chi nhánh</option>
+              </select>
+            </label>
+            <label>User ID
+              <input id="ceo-new-user-username" type="text" placeholder="VD: nv_lan" />
+            </label>
+            <label>Tên hiển thị
+              <input id="ceo-new-user-display-name" type="text" placeholder="VD: Nhan vien Lan" />
+            </label>
+            <label>Mật khẩu
+              <input id="ceo-new-user-password" type="password" placeholder="Toi thieu 6 ky tu" />
+            </label>
+            <label id="ceo-new-user-branch-single-wrap">Chi nhánh quản lí
+              <select id="ceo-new-user-branch-single"></select>
+            </label>
+            <label id="ceo-new-user-branch-multi-wrap" class="hidden">Phân vùng chi nhánh nhân viên
+              <select id="ceo-new-user-branch-multi" multiple size="4"></select>
+            </label>
+            <label>&nbsp;
+              <button id="btn-ceo-create-user" type="button">Tạo tài khoản</button>
+            </label>
+          </div>
+
+          <h4>Danh sách tài khoản nhân sự</h4>
+          <div id="ceo-users-list" class="list"></div>
+        </div>
+      </section>
+    </section>
+
+    <section id="toast" class="toast hidden"></section>
+  </main>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
