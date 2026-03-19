@@ -641,7 +641,7 @@ def create_app():
             return jsonify({"error": "Mật khẩu hiện tại không đúng"}), 401
 
         conn.execute(
-            "UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE users SET password_hash = ? WHERE id = ?",
             (generate_password_hash(new_password), user["id"]),
         )
         conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user["id"],))
@@ -1403,8 +1403,6 @@ def create_app():
                 valid_rows,
             )
         conn.commit()
-        conn.close()
-        return jsonify({"message": "Saved preferences", "count": len(valid_rows)})
 
     @app.get("/api/employee/preferences")
     def employee_preferences():
@@ -2257,8 +2255,7 @@ def create_app():
                 phone_number = ?,
                 address = ?,
                 date_of_birth = ?,
-                job_position = ?,
-                updated_at = CURRENT_TIMESTAMP
+                job_position = ?
             WHERE id = ?
             """,
             (
