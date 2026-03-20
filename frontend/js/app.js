@@ -950,10 +950,10 @@ async function loadEmployeeAssignedSchedule() {
   });
 
   const board = document.createElement("div");
-  board.className = "week-table-wrap";
+  board.className = "week-table-wrap employee-assigned-board";
   const headerCells = weekHeaderCellsHtml();
   board.innerHTML = `
-    <table class="week-table">
+    <table class="week-table employee-assigned-table">
       <thead>
         <tr>
           <th class="week-shift-col">Ca lam</th>
@@ -974,11 +974,11 @@ async function loadEmployeeAssignedSchedule() {
           ? rows
               .map(
                 (item) =>
-                  `<span class="tt-pill">${item.branch_name} - Xếp bởi: ${item.assigned_by_name}</span>`
+                  `<span class="tt-pill assigned-pill"><strong>${item.branch_name}</strong><small>Xếp bởi: ${item.assigned_by_name}</small></span>`
               )
               .join("")
-          : `<span class="tt-empty">Trống</span>`;
-        return `<td><div class="tt-content">${content}</div></td>`;
+          : `<span class="tt-empty assigned-empty">Trống</span>`;
+        return `<td class="assigned-cell day-${meta.day}"><div class="tt-content assigned-content">${content}</div></td>`;
       })
       .join("");
 

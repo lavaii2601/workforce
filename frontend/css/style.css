@@ -643,6 +643,71 @@ body.no-scroll {
   background: #fff;
 }
 
+.employee-assigned-board {
+  margin-top: 12px;
+}
+
+.employee-assigned-table {
+  min-width: 980px;
+}
+
+.employee-assigned-table thead th {
+  background: linear-gradient(180deg, #eaf6ef, #e4f2ea);
+}
+
+.employee-assigned-table tbody tr:nth-child(odd) td {
+  background: #fcfdfc;
+}
+
+.employee-assigned-table tbody tr:hover td {
+  background: #f3f9f5;
+}
+
+.employee-assigned-table .week-shift-col {
+  width: 270px;
+  font-weight: 700;
+}
+
+.employee-assigned-table .assigned-cell {
+  min-width: 132px;
+}
+
+.employee-assigned-table .assigned-content {
+  gap: 6px;
+  align-items: stretch;
+}
+
+.employee-assigned-table .assigned-pill {
+  display: grid;
+  gap: 2px;
+  border-radius: 10px;
+  border: 1px solid rgba(14, 125, 87, 0.23);
+  background: rgba(14, 125, 87, 0.08);
+  padding: 6px 8px;
+}
+
+.employee-assigned-table .assigned-pill strong {
+  font-size: 0.89rem;
+  font-weight: 700;
+  color: #104131;
+}
+
+.employee-assigned-table .assigned-pill small {
+  font-size: 0.77rem;
+  color: rgba(21, 33, 29, 0.74);
+}
+
+.employee-assigned-table .assigned-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  border-radius: 8px;
+  background: rgba(120, 132, 126, 0.12);
+  color: rgba(21, 33, 29, 0.65);
+  padding: 0 8px;
+}
+
 .compact-week-table-wrap {
   margin-top: 8px;
 }
@@ -1402,6 +1467,10 @@ button.danger {
 
   .week-table {
     min-width: 760px;
+  }
+
+  .employee-assigned-table {
+    min-width: 860px;
   }
 
   .timetable-head,
