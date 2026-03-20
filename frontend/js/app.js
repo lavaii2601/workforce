@@ -422,10 +422,17 @@ async function renderRoute() {
     await loadManagerShiftAttendanceToday();
     $("#manager-attendance-one-time-meta").textContent =
       "Nhấn Tạo QR cho ngày hôm nay. Mỗi lần nhân viên quét sẽ nhận random key one-time riêng.";
-    const oneTimeQrImage = $("#manager-attendance-one-time-qr-image");
-    if (oneTimeQrImage) {
-      oneTimeQrImage.classList.add("hidden");
-      oneTimeQrImage.removeAttribute("src");
+    try {
+      await generateManagerOneTimeQr();
+    } catch (error) {
+      const oneTimeQrImage = $("#manager-attendance-one-time-qr-image");
+      if (oneTimeQrImage) {
+        oneTimeQrImage.classList.add("hidden");
+        oneTimeQrImage.removeAttribute("src");
+      }
+      const message = error instanceof Error ? error.message : "Khong tai duoc QR hom nay";
+      $("#manager-attendance-one-time-meta").textContent =
+        `Khong tai duoc QR hom nay: ${message}. Vui long bam Tao QR lai.`;
     }
   }
   if (key === "manager-self-shifts") await loadManagerSelfShifts();
