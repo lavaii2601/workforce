@@ -105,6 +105,7 @@ Neu khong co, he thong fallback sang SQLite (phu hop local/dev, khong phu hop pr
 
 - `SQLITE_PATH`: ghi de duong dan file SQLite (uu tien cao nhat).
 - `DATABASE_URL`: chuoi ket noi Postgres (uu tien cao nhat, dung cho production).
+- `SUPABASE_DATABASE_URL`: fallback khi ban muon dat rieng connection string Supabase.
 - Nhom OpenJarvis (neu dung):
 	- `OPENJARVIS_ENABLED`
 	- `OPENJARVIS_API_URL`
