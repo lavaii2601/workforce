@@ -945,22 +945,6 @@ button.danger {
   object-fit: contain;
 }
 
-.qr-camera-wrap {
-  width: min(380px, 100%);
-  border: 2px solid rgba(21, 33, 29, 0.34);
-  border-radius: 12px;
-  background: #fff;
-  padding: 8px;
-}
-
-.qr-camera-preview {
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  border-radius: 8px;
-  background: #101010;
-  object-fit: cover;
-}
-
 .shift-attendance-item {
   border-left-width: 6px;
 }

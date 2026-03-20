@@ -39,14 +39,6 @@ const authUiState = {
   screen: "login",
 };
 
-const qrCameraState = {
-  stream: null,
-  detector: null,
-  timerId: null,
-  isRunning: false,
-  isDetecting: false,
-};
-
 const WEEK_DAYS = [1, 2, 3, 4, 5, 6, 7];
 const managerStaffingRules = new Map();
 
@@ -410,9 +402,6 @@ async function renderRoute() {
   if (!state.currentUser) return;
   ensureValidRoute();
   const key = activeRouteKey();
-  if (key !== "employee-attendance") {
-    stopEmployeeQrCameraScan();
-  }
   renderNav();
 
   document.querySelectorAll(".route-view").forEach((node) => node.classList.add("hidden"));
@@ -569,104 +558,6 @@ function loadCeoUserBranchOptions() {
   }
 }
 
-function qrCameraSupported() {
-  return typeof window.BarcodeDetector !== "undefined"
-    && !!navigator.mediaDevices
-    && typeof navigator.mediaDevices.getUserMedia === "function";
-}
-
-function setEmployeeQrCameraStatus(message) {
-  const statusNode = $("#employee-qr-camera-status");
-  if (statusNode) {
-    statusNode.textContent = message;
-  }
-}
-
-async function toggleEmployeeQrCameraScan() {
-  if (qrCameraState.isRunning) {
-    stopEmployeeQrCameraScan();
-    return;
-  }
-  await startEmployeeQrCameraScan();
-}
-
-async function startEmployeeQrCameraScan() {
-  if (!qrCameraSupported()) {
-    throw new Error("Trình duyệt chưa hỗ trợ quét QR bằng camera");
-  }
-  if (qrCameraState.isRunning) return;
-
-  const preview = $("#employee-qr-camera-preview");
-  const wrap = $("#employee-qr-camera-wrap");
-  const toggleBtn = $("#btn-toggle-employee-qr-camera");
-  if (!preview || !wrap || !toggleBtn) return;
-
-  const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: "environment" },
-    audio: false,
-  });
-
-  qrCameraState.detector = detector;
-  qrCameraState.stream = stream;
-  qrCameraState.isRunning = true;
-  preview.srcObject = stream;
-  wrap.classList.remove("hidden");
-  toggleBtn.textContent = "Tắt camera quét QR";
-  setEmployeeQrCameraStatus("Đang quét QR... đưa mã vào giữa khung hình.");
-
-  qrCameraState.timerId = window.setInterval(async () => {
-    if (!qrCameraState.isRunning || qrCameraState.isDetecting) return;
-    if (!preview.videoWidth || !preview.videoHeight) return;
-    qrCameraState.isDetecting = true;
-    try {
-      const codes = await qrCameraState.detector.detect(preview);
-      if (!codes || !codes.length) return;
-      const rawValue = String(codes[0].rawValue || "").trim();
-      if (!rawValue) return;
-
-      $("#employee-one-time-qr-payload").value = rawValue;
-      setEmployeeQrCameraStatus("Đã nhận QR, đang xác thực để lấy random key...");
-      await scanEmployeeOneTimeQr();
-      stopEmployeeQrCameraScan();
-    } catch {
-      // Keep scanner alive for transient camera/decoder failures.
-    } finally {
-      qrCameraState.isDetecting = false;
-    }
-  }, 600);
-}
-
-function stopEmployeeQrCameraScan() {
-  if (qrCameraState.timerId) {
-    window.clearInterval(qrCameraState.timerId);
-    qrCameraState.timerId = null;
-  }
-
-  if (qrCameraState.stream) {
-    qrCameraState.stream.getTracks().forEach((track) => track.stop());
-    qrCameraState.stream = null;
-  }
-
-  qrCameraState.detector = null;
-  qrCameraState.isRunning = false;
-  qrCameraState.isDetecting = false;
-
-  const preview = $("#employee-qr-camera-preview");
-  const wrap = $("#employee-qr-camera-wrap");
-  const toggleBtn = $("#btn-toggle-employee-qr-camera");
-  if (preview) {
-    preview.srcObject = null;
-  }
-  if (wrap) {
-    wrap.classList.add("hidden");
-  }
-  if (toggleBtn) {
-    toggleBtn.textContent = "Bật camera quét QR";
-  }
-  setEmployeeQrCameraStatus("Camera đang tắt.");
-}
-
 function syncCeoUserRoleForm() {
   const role = $("#ceo-new-user-role")?.value || "employee";
   $("#ceo-new-user-branch-single-wrap")?.classList.toggle("hidden", role !== "manager");
@@ -814,7 +705,7 @@ async function scanEmployeeOneTimeQr() {
     qrToken: payload.qr_token,
     randomKey: payload.random_key,
   };
-  $("#employee-one-time-random-key").value = "";
+  $("#employee-one-time-random-key").value = payload.random_key || "";
   $("#employee-one-time-scan-result").textContent =
     `Random key nhận được: ${payload.random_key || "-"}. Vui lòng nhập key để xác nhận bắt đầu chấm công.`;
   showToast("Da quet QR va nhan random key");
@@ -823,7 +714,22 @@ async function scanEmployeeOneTimeQr() {
 async function checkInEmployeeOneTime() {
   const note = $("#attendance-note").value.trim();
   if (!state.oneTimeScan) {
-    throw new Error("Vui long quet QR de lay random key truoc khi check-in");
+    const payloadInput = $("#employee-one-time-qr-payload");
+    const keyInput = $("#employee-one-time-random-key");
+    const payloadText = (payloadInput?.value || "").trim();
+    const keyText = (keyInput?.value || "").trim();
+
+    if (!payloadText && keyText.toUpperCase().startsWith("WM1|")) {
+      payloadInput.value = keyText;
+    }
+
+    if ((payloadInput?.value || "").trim()) {
+      await scanEmployeeOneTimeQr();
+    }
+
+    if (!state.oneTimeScan) {
+      throw new Error("Vui long quet QR de lay random key truoc khi check-in");
+    }
   }
 
   const typedKey = $("#employee-one-time-random-key").value.trim().toUpperCase();
@@ -2164,9 +2070,6 @@ function attachEvents() {
   );
   $("#btn-scan-one-time-qr").addEventListener("click", () =>
     scanEmployeeOneTimeQr().catch((e) => showToast(e.message, true))
-  );
-  $("#btn-toggle-employee-qr-camera").addEventListener("click", () =>
-    toggleEmployeeQrCameraScan().catch((e) => showToast(e.message, true))
   );
   $("#btn-check-out").addEventListener("click", () => checkOutEmployee().catch((e) => showToast(e.message, true)));
   $("#btn-save-employee-shifts").addEventListener("click", () => saveEmployeeShifts().catch((e) => showToast(e.message, true)));

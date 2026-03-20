@@ -1007,6 +1007,7 @@ def create_app():
             return jsonify({"error": token_error}), 400
 
         conn = get_conn()
+
         branch = conn.execute(
             "SELECT id, name, network_ip FROM branches WHERE id = ?",
             (branch_id,),
