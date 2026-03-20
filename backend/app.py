@@ -341,21 +341,25 @@ def create_app():
                 SELECT u.id AS employee_id,
                        u.display_name AS employee_name,
                        u.username,
+                       u.role,
                        b.name AS branch_name,
                        COALESCE(SUM(COALESCE(a.minutes_worked, 0)), 0) AS total_minutes,
                        COUNT(a.id) AS attendance_sessions
                 FROM users u
-                JOIN employee_branch_access eba
-                     ON eba.employee_id = u.id
-                    AND eba.branch_id = ?
-                JOIN branches b ON b.id = eba.branch_id
+                JOIN branches b ON b.id = ?
+                LEFT JOIN employee_branch_access eba
+                       ON eba.employee_id = u.id
+                      AND eba.branch_id = b.id
                 LEFT JOIN attendance_logs a
                        ON a.employee_id = u.id
-                      AND a.branch_id = eba.branch_id
+                      AND a.branch_id = b.id
                       AND a.check_in_at >= ?
                       AND a.check_in_at < ?
-                WHERE u.role = 'employee'
-                GROUP BY u.id, u.display_name, u.username, b.name
+                WHERE (
+                        (u.role = 'employee' AND eba.employee_id IS NOT NULL)
+                     OR (u.role = 'manager' AND u.branch_id = b.id)
+                )
+                GROUP BY u.id, u.display_name, u.username, u.role, b.name
                 ORDER BY u.display_name
                 """,
                 (branch_id, start_dt, end_dt),
@@ -366,16 +370,18 @@ def create_app():
                 SELECT u.id AS employee_id,
                        u.display_name AS employee_name,
                        u.username,
-                       'Toan he thong' AS branch_name,
+                       u.role,
+                       COALESCE(b.name, 'Toan he thong') AS branch_name,
                        COALESCE(SUM(COALESCE(a.minutes_worked, 0)), 0) AS total_minutes,
                        COUNT(a.id) AS attendance_sessions
                 FROM users u
+                LEFT JOIN branches b ON b.id = u.branch_id
                 LEFT JOIN attendance_logs a
                        ON a.employee_id = u.id
                       AND a.check_in_at >= ?
                       AND a.check_in_at < ?
-                WHERE u.role = 'employee'
-                GROUP BY u.id, u.display_name, u.username
+                WHERE u.role IN ('employee', 'manager')
+                GROUP BY u.id, u.display_name, u.username, u.role, COALESCE(b.name, 'Toan he thong')
                 ORDER BY u.display_name
                 """,
                 (start_dt, end_dt),
@@ -2168,6 +2174,7 @@ def create_app():
                 item["employee_id"],
                 item["username"],
                 item["employee_name"],
+                item["role"],
                 item["branch_name"],
                 round(item["total_minutes"] / 60, 2),
                 item["attendance_sessions"],
@@ -2181,6 +2188,7 @@ def create_app():
                 "employee_id",
                 "username",
                 "employee_name",
+                "role",
                 "branch_name",
                 "hours_worked",
                 "attendance_sessions",
@@ -2529,6 +2537,7 @@ def create_app():
                 item["employee_id"],
                 item["username"],
                 item["employee_name"],
+                item["role"],
                 item["branch_name"],
                 round(item["total_minutes"] / 60, 2),
                 item["attendance_sessions"],
@@ -2542,6 +2551,7 @@ def create_app():
                 "employee_id",
                 "username",
                 "employee_name",
+                "role",
                 "branch_scope",
                 "hours_worked",
                 "attendance_sessions",
