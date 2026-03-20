@@ -62,7 +62,6 @@ def create_app():
     PROFILE_REQUIRED_ROLES = {"employee", "manager"}
     ATTENDANCE_QR_ONE_TIME_TTL_SECONDS = 45
     ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
-    ATTENDANCE_STATIC_QR_LIFETIME_DAYS = 3650
     DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     SHIFT_DEFINITION_MAP = {item["code"]: item for item in SHIFT_DEFINITIONS}
 
@@ -969,9 +968,11 @@ def create_app():
             return jsonify({"error": "Branch not found"}), 404
 
         now_dt = datetime.now()
-        expires_at_dt = now_dt + timedelta(days=ATTENDANCE_STATIC_QR_LIFETIME_DAYS)
+        expires_at_dt = now_dt.replace(hour=23, minute=59, second=59, microsecond=0)
+        if expires_at_dt <= now_dt:
+            expires_at_dt = expires_at_dt + timedelta(days=1)
         expires_ts = int(expires_at_dt.timestamp())
-        qr_nonce = "BRANCH_STATIC"
+        qr_nonce = f"DAY_{now_dt.strftime('%Y%m%d')}"
         qr_token = _build_attendance_qr_token(branch["id"], expires_ts, qr_nonce)
         expires_at = _format_db_datetime(expires_at_dt)
         conn.close()
