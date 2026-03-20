@@ -67,6 +67,41 @@ Mo trinh duyet: `http://127.0.0.1:5000`
 - Frontend: HTML/CSS/JS responsive (mobile-first).
 - Auth demo: chon user va dang nhap qua API `/api/login`.
 
+## Deploy len Vercel
+
+Du an da duoc toi uu de chay tren Vercel voi Flask serverless.
+
+### File da co san cho Vercel
+
+- `api/index.py`: entrypoint serverless (WSGI app).
+- `vercel.json`: rewrite moi route ve Flask de phuc vu ca API + frontend.
+
+### Cach deploy
+
+1. Push source code len GitHub.
+2. Tren Vercel, chon `New Project` va import repo.
+3. Framework Preset de mac dinh (`Other`) la du.
+4. Deploy.
+
+### Luu y quan trong ve SQLite tren Vercel
+
+- Vercel co filesystem tam thoi cho function, chi ghi duoc trong `/tmp`.
+- Backend da tu dong dung `/tmp/data.db` khi detect moi truong Vercel.
+- Du lieu SQLite se **khong ben vung** giua cac lan cold start/redeploy.
+
+Neu can ben vung du lieu production, nen doi sang DB ngoai (Postgres/MySQL/Supabase/Neon).
+
+### Bien moi truong tuy chon
+
+- `SQLITE_PATH`: ghi de duong dan file SQLite (uu tien cao nhat).
+- Nhom OpenJarvis (neu dung):
+	- `OPENJARVIS_ENABLED`
+	- `OPENJARVIS_API_URL`
+	- `OPENJARVIS_MODEL`
+	- `OPENJARVIS_TIMEOUT_SECONDS`
+	- `OPENJARVIS_TEMPERATURE`
+	- `OPENJARVIS_MAX_TOKENS`
+
 ## API chinh
 
 - `POST /api/login`

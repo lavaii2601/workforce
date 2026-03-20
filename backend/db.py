@@ -1,10 +1,24 @@
 import sqlite3
+import os
 from pathlib import Path
 
 from werkzeug.security import generate_password_hash
 from .constants import SHIFT_DEFINITIONS
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data.db"
+
+def _resolve_db_path():
+    configured = (os.getenv("SQLITE_PATH") or "").strip()
+    if configured:
+        return Path(configured)
+
+    if os.getenv("VERCEL") == "1":
+        # Vercel filesystem is read-only except /tmp.
+        return Path("/tmp") / "data.db"
+
+    return Path(__file__).resolve().parent.parent / "data.db"
+
+
+DB_PATH = _resolve_db_path()
 
 
 def get_conn():
