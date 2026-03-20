@@ -62,6 +62,7 @@ def create_app():
     PROFILE_REQUIRED_ROLES = {"employee", "manager"}
     ATTENDANCE_QR_ONE_TIME_TTL_SECONDS = 45
     ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
+    ATTENDANCE_STATIC_QR_LIFETIME_DAYS = 3650
     DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     SHIFT_DEFINITION_MAP = {item["code"]: item for item in SHIFT_DEFINITIONS}
 
@@ -417,6 +418,9 @@ def create_app():
     def _build_one_time_qr_payload(branch_id, one_time_code, qr_token):
         return f"WM1|{branch_id}|{one_time_code}|{qr_token}"
 
+    def _build_static_branch_qr_payload(branch_id, qr_token):
+        return f"WM2|{branch_id}|{qr_token}"
+
     def _build_qr_image_data_url(content):
         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=7, border=2)
         qr.add_data(content)
@@ -443,6 +447,33 @@ def create_app():
             return None, None, None, "Invalid QR one-time payload content"
 
         return branch_id, one_time_code, qr_token, None
+
+    def _parse_attendance_qr_payload(raw_payload):
+        parts = (raw_payload or "").strip().split("|")
+        if not parts:
+            return None, None, None, None, "Invalid QR payload format"
+
+        version = parts[0]
+        if version == "WM1":
+            branch_id, one_time_code, qr_token, parse_error = _parse_one_time_qr_payload(raw_payload)
+            if parse_error:
+                return None, None, None, None, parse_error
+            return "legacy", branch_id, one_time_code, qr_token, None
+
+        if version == "WM2":
+            if len(parts) != 3:
+                return None, None, None, None, "Invalid static QR payload format"
+            try:
+                branch_id = int(parts[1])
+            except (TypeError, ValueError):
+                return None, None, None, None, "Invalid branch in static QR payload"
+
+            qr_token = (parts[2] or "").strip()
+            if not qr_token:
+                return None, None, None, None, "Invalid static QR payload content"
+            return "static", branch_id, None, qr_token, None
+
+        return None, None, None, None, "Unsupported QR payload version"
 
     def _cleanup_one_time_qr_codes(conn):
         now_dt = datetime.now()
@@ -938,31 +969,11 @@ def create_app():
             return jsonify({"error": "Branch not found"}), 404
 
         now_dt = datetime.now()
-        expires_at_dt = now_dt.replace(hour=23, minute=59, second=59, microsecond=0)
-        if expires_at_dt <= now_dt:
-            expires_at_dt = expires_at_dt + timedelta(days=1)
+        expires_at_dt = now_dt + timedelta(days=ATTENDANCE_STATIC_QR_LIFETIME_DAYS)
         expires_ts = int(expires_at_dt.timestamp())
-        qr_nonce = secrets.token_hex(4)
+        qr_nonce = "BRANCH_STATIC"
         qr_token = _build_attendance_qr_token(branch["id"], expires_ts, qr_nonce)
-        one_time_code = _generate_one_time_attendance_code()
         expires_at = _format_db_datetime(expires_at_dt)
-
-        _cleanup_one_time_qr_codes(conn)
-
-        conn.execute(
-            """
-            INSERT INTO attendance_qr_one_time_codes(
-                branch_id,
-                qr_token,
-                one_time_code,
-                expires_at,
-                generated_by_manager_id
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (branch["id"], qr_token, one_time_code, expires_at, user["id"]),
-        )
-        conn.commit()
         conn.close()
 
         return jsonify(
@@ -971,10 +982,9 @@ def create_app():
                 "branch_name": branch["name"],
                 "network_ip": branch["network_ip"],
                 "qr_token": qr_token,
-                "one_time_code": one_time_code,
-                "qr_payload": _build_one_time_qr_payload(branch["id"], one_time_code, qr_token),
+                "qr_payload": _build_static_branch_qr_payload(branch["id"], qr_token),
                 "qr_image_data_url": _build_qr_image_data_url(
-                    _build_one_time_qr_payload(branch["id"], one_time_code, qr_token)
+                    _build_static_branch_qr_payload(branch["id"], qr_token)
                 ),
                 "expires_at": expires_at,
                 "ttl_seconds": max(1, int((expires_at_dt - now_dt).total_seconds())),
@@ -1185,7 +1195,7 @@ def create_app():
 
         body = request.get_json(silent=True) or {}
         qr_payload = body.get("qr_payload")
-        branch_id, one_time_code, qr_token, parse_error = _parse_one_time_qr_payload(qr_payload)
+        payload_type, branch_id, one_time_code, qr_token, parse_error = _parse_attendance_qr_payload(qr_payload)
         if parse_error:
             return jsonify({"error": parse_error}), 400
 
@@ -1214,6 +1224,52 @@ def create_app():
         if not _is_branch_ip_allowed(branch, client_ip):
             conn.close()
             return jsonify({"error": "Ban phai ket noi Wi-Fi chi nhanh de quet QR"}), 403
+
+        if payload_type == "static":
+            manager_row = conn.execute(
+                """
+                SELECT id
+                FROM users
+                WHERE role = 'manager'
+                  AND branch_id = ?
+                  AND is_active = 1
+                ORDER BY id
+                LIMIT 1
+                """,
+                (branch_id,),
+            ).fetchone()
+            if not manager_row:
+                conn.close()
+                return jsonify({"error": "Chi nhanh chua co quan ly hoat dong de cap key"}), 400
+
+            _cleanup_one_time_qr_codes(conn)
+            issued_one_time_code = _generate_one_time_attendance_code()
+            issued_expires_at_dt = datetime.now() + timedelta(seconds=ATTENDANCE_QR_ONE_TIME_TTL_SECONDS)
+            issued_expires_at = _format_db_datetime(issued_expires_at_dt)
+
+            conn.execute(
+                """
+                INSERT INTO attendance_qr_one_time_codes(
+                    branch_id,
+                    qr_token,
+                    one_time_code,
+                    expires_at,
+                    generated_by_manager_id
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (branch_id, qr_token, issued_one_time_code, issued_expires_at, manager_row["id"]),
+            )
+            conn.commit()
+            conn.close()
+            return jsonify(
+                {
+                    "branch_id": branch_id,
+                    "qr_token": qr_token,
+                    "random_key": issued_one_time_code,
+                    "expires_at": issued_expires_at,
+                }
+            )
 
         now_raw = _format_db_datetime(datetime.now())
         _cleanup_one_time_qr_codes(conn)

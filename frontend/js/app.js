@@ -421,7 +421,7 @@ async function renderRoute() {
     await loadMyAttendance("manager");
     await loadManagerShiftAttendanceToday();
     $("#manager-attendance-one-time-meta").textContent =
-      "Nhấn Tạo QR One-time để nhân viên quét và lấy key chấm công trong ngày";
+      "Nhấn Tạo QR để lấy mã dùng lâu dài. Mỗi lần nhân viên quét sẽ nhận random key one-time riêng.";
     const oneTimeQrImage = $("#manager-attendance-one-time-qr-image");
     if (oneTimeQrImage) {
       oneTimeQrImage.classList.add("hidden");
@@ -612,8 +612,8 @@ async function generateManagerOneTimeQr() {
     imageNode.classList.toggle("hidden", !payload.qr_image_data_url);
   }
   $("#manager-attendance-one-time-meta").textContent =
-    `Đã tạo QR one-time | Hết hạn: ${formatDateTimeDisplay(payload.expires_at)}`;
-  showToast("Da tao QR one-time ngan han");
+    `Đã tạo QR dùng lâu dài | Hết hạn dự kiến: ${formatDateTimeDisplay(payload.expires_at)}`;
+  showToast("Da tao QR dung lau dai");
 }
 
 function shiftAttendanceStatusLabel(status) {
