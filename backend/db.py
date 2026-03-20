@@ -404,7 +404,8 @@ def init_db():
 
 def _execute_postgres_script(cur, schema_sql):
     transformed = schema_sql
-    transformed = transformed.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+    # Keep ID type as integer-compatible so existing INTEGER foreign keys remain valid.
+    transformed = transformed.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     transformed = re.sub(
         r"\bCURRENT_TIMESTAMP\b",
         POSTGRES_NOW_TEXT_EXPR,
