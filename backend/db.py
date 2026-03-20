@@ -1,13 +1,162 @@
+import os
+import re
 import sqlite3
 from pathlib import Path
+
+import psycopg
+from psycopg.rows import dict_row
 
 from werkzeug.security import generate_password_hash
 from .constants import SHIFT_DEFINITIONS
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data.db"
+
+POSTGRES_NOW_TEXT_EXPR = "(to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))"
+ID_TABLES = {
+    "branches",
+    "users",
+    "shift_preferences",
+    "weekly_schedule",
+    "ceo_chat_messages",
+    "auth_sessions",
+    "attendance_logs",
+    "attendance_employee_codes",
+    "attendance_qr_one_time_codes",
+    "shift_attendance_marks",
+    "issue_reports",
+    "audit_logs",
+}
+
+
+def _resolve_database_url():
+    candidates = [
+        os.getenv("DATABASE_URL"),
+        os.getenv("SUPABASE_DATABASE_URL"),
+        os.getenv("POSTGRES_URL"),
+        os.getenv("POSTGRES_PRISMA_URL"),
+        os.getenv("POSTGRES_URL_NON_POOLING"),
+    ]
+    for value in candidates:
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+DATABASE_URL = _resolve_database_url()
+IS_POSTGRES = bool(DATABASE_URL)
+
+
+def is_postgres_backend():
+    return IS_POSTGRES
+
+
+def _transform_sql_for_postgres(sql):
+    transformed = sql
+    has_nocase = "COLLATE NOCASE" in transformed.upper()
+    if has_nocase:
+        transformed = re.sub(r"\s+COLLATE\s+NOCASE", "", transformed, flags=re.IGNORECASE)
+        transformed = re.sub(r"\s+LIKE\s+", " ILIKE ", transformed, flags=re.IGNORECASE)
+
+    transformed = re.sub(
+        r"GROUP_CONCAT\(([^,\)]+),\s*'([^']*)'\)",
+        r"STRING_AGG((\1)::text, '\2')",
+        transformed,
+        flags=re.IGNORECASE,
+    )
+    transformed = re.sub(
+        r"GROUP_CONCAT\(([^\)]+)\)",
+        r"STRING_AGG((\1)::text, ',')",
+        transformed,
+        flags=re.IGNORECASE,
+    )
+
+    transformed = re.sub(r"\bCURRENT_TIMESTAMP\b", POSTGRES_NOW_TEXT_EXPR, transformed)
+
+    transformed = re.sub(r"\?", "%s", transformed)
+    return transformed
+
+
+class _PgCursorAdapter:
+    def __init__(self, pg_cursor):
+        self._cursor = pg_cursor
+        self.lastrowid = None
+
+    def execute(self, sql, params=None):
+        transformed_sql = _transform_sql_for_postgres(sql)
+        final_sql = transformed_sql
+
+        insert_table_match = re.match(
+            r"\s*INSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            transformed_sql,
+            flags=re.IGNORECASE,
+        )
+        if insert_table_match and "RETURNING" not in transformed_sql.upper():
+            table_name = insert_table_match.group(1).lower()
+            if table_name in ID_TABLES:
+                final_sql = f"{transformed_sql.rstrip()} RETURNING id"
+
+        self._cursor.execute(final_sql, tuple(params or ()))
+        if final_sql != transformed_sql:
+            row = self._cursor.fetchone()
+            self.lastrowid = row["id"] if row else None
+        else:
+            self.lastrowid = None
+        return self
+
+    def executemany(self, sql, seq_of_params):
+        transformed_sql = _transform_sql_for_postgres(sql)
+        self._cursor.executemany(transformed_sql, [tuple(item) for item in seq_of_params])
+        self.lastrowid = None
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class _PgConnAdapter:
+    def __init__(self, pg_conn):
+        self._conn = pg_conn
+
+    def execute(self, sql, params=None):
+        cur = _PgCursorAdapter(self._conn.cursor())
+        return cur.execute(sql, params)
+
+    def executemany(self, sql, seq_of_params):
+        cur = _PgCursorAdapter(self._conn.cursor())
+        return cur.executemany(sql, seq_of_params)
+
+    def cursor(self):
+        return _PgCursorAdapter(self._conn.cursor())
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+def _resolve_db_path():
+    configured = (os.getenv("SQLITE_PATH") or "").strip()
+    if configured:
+        return Path(configured)
+
+    if os.getenv("VERCEL") == "1":
+        # Vercel filesystem is read-only except /tmp.
+        return Path("/tmp") / "data.db"
+
+    return Path(__file__).resolve().parent.parent / "data.db"
+
+
+DB_PATH = _resolve_db_path()
 
 
 def get_conn():
+    if IS_POSTGRES:
+        pg_conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        return _PgConnAdapter(pg_conn)
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -18,8 +167,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.executescript(
-        """
+    schema_sql = """
         CREATE TABLE IF NOT EXISTS branches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -242,13 +390,31 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_branch_shift_requirements_branch
         ON branch_shift_requirements(branch_id);
         """
-    )
 
-    _run_migrations(conn)
+    if IS_POSTGRES:
+        _execute_postgres_script(cur, schema_sql)
+    else:
+        cur.executescript(schema_sql)
+        _run_migrations(conn)
 
     seed_data(conn)
     conn.commit()
     conn.close()
+
+
+def _execute_postgres_script(cur, schema_sql):
+    transformed = schema_sql
+    # Keep ID type as integer-compatible so existing INTEGER foreign keys remain valid.
+    transformed = transformed.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    transformed = re.sub(
+        r"\bCURRENT_TIMESTAMP\b",
+        POSTGRES_NOW_TEXT_EXPR,
+        transformed,
+    )
+
+    statements = [segment.strip() for segment in transformed.split(";") if segment.strip()]
+    for statement in statements:
+        cur.execute(statement)
 
 
 def _table_has_column(conn, table_name, column_name):
