@@ -1087,29 +1087,6 @@ button.danger {
   display: block;
 }
 
-#route-manager-employees .manager-employee-edit {
-  display: block;
-}
-
-#route-manager-employees .manager-employee-edit-grid {
-  margin-bottom: 6px;
-  gap: 8px;
-}
-
-#route-manager-employees .manager-employee-edit-grid label {
-  font-size: 0.88rem;
-}
-
-#route-manager-employees .manager-employee-edit-grid input {
-  padding: 8px 10px;
-  border-radius: 9px;
-}
-
-#route-manager-employees .manager-employee-item.is-editing {
-  background: rgba(255, 252, 239, 0.9);
-  border-color: rgba(179, 124, 24, 0.38);
-}
-
 #route-manager-employees .manager-employee-item .row.compact {
   align-self: center;
 }

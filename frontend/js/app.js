@@ -1352,54 +1352,13 @@ async function loadManagerEmployees() {
           <small>Địa chỉ: ${escapeHtml(address || "-")}</small><br />
           <small>Chi nhánh: ${escapeHtml(branchNames || "-")}</small>
         </div>
-        <div class="manager-employee-edit hidden">
-          <div class="field-grid manager-employee-edit-grid">
-            <label>Tên hiển thị
-              <input type="text" data-edit-display-name value="${escapeHtml(e.display_name || "")}" />
-            </label>
-            <label>Họ tên
-              <input type="text" data-edit-full-name value="${escapeHtml(e.full_name || "")}" />
-            </label>
-            <label>Số điện thoại
-              <input type="text" data-edit-phone value="${escapeHtml(phone)}" placeholder="VD: 0901234567" />
-            </label>
-            <label>Ngày sinh
-              <input type="date" data-edit-dob value="${escapeHtml(birth)}" />
-            </label>
-            <label>Vị trí
-              <input type="text" data-edit-position value="${escapeHtml(position)}" />
-            </label>
-            <label>Địa chỉ
-              <input type="text" data-edit-address value="${escapeHtml(address)}" />
-            </label>
-          </div>
-          <small class="muted">Bắt buộc: Tên hiển thị, Họ tên. Có thể cập nhật ngay để tránh sai sót.</small>
-        </div>
       </div>
       <div class="row compact">
-        <button class="ghost" data-edit-emp="${e.id}">Sửa</button>
-        <button class="hidden" data-save-emp="${e.id}">Lưu</button>
-        <button class="ghost hidden" data-cancel-edit-emp="${e.id}">Hủy</button>
         <button class="danger" data-del-emp="${e.id}">Xóa</button>
       </div>
     `;
     list.appendChild(row);
   });
-}
-
-function validateManagerEmployeeUpdate(payload) {
-  if (!payload.display_name) {
-    throw new Error("Tên hiển thị không được để trống");
-  }
-  if (!payload.full_name) {
-    throw new Error("Họ tên không được để trống");
-  }
-  if (payload.phone_number && !/^\+?[0-9]{9,15}$/.test(payload.phone_number)) {
-    throw new Error("Số điện thoại không hợp lệ");
-  }
-  if (payload.date_of_birth && !/^\d{4}-\d{2}-\d{2}$/.test(payload.date_of_birth)) {
-    throw new Error("Ngày sinh phải theo định dạng YYYY-MM-DD");
-  }
 }
 
 function bindManagerEmployeeListEvents() {
@@ -1411,53 +1370,6 @@ function bindManagerEmployeeListEvents() {
   list.addEventListener("click", async (event) => {
     const row = event.target.closest(".manager-employee-item");
     if (!row) return;
-
-    const editBtn = event.target.closest("button[data-edit-emp]");
-    if (editBtn) {
-      row.classList.add("is-editing");
-      row.querySelector(".manager-employee-view")?.classList.add("hidden");
-      row.querySelector(".manager-employee-edit")?.classList.remove("hidden");
-      row.querySelector("button[data-edit-emp]")?.classList.add("hidden");
-      row.querySelector("button[data-save-emp]")?.classList.remove("hidden");
-      row.querySelector("button[data-cancel-edit-emp]")?.classList.remove("hidden");
-      row.querySelector("input[data-edit-display-name]")?.focus();
-      return;
-    }
-
-    const cancelBtn = event.target.closest("button[data-cancel-edit-emp]");
-    if (cancelBtn) {
-      row.classList.remove("is-editing");
-      row.querySelector(".manager-employee-view")?.classList.remove("hidden");
-      row.querySelector(".manager-employee-edit")?.classList.add("hidden");
-      row.querySelector("button[data-edit-emp]")?.classList.remove("hidden");
-      row.querySelector("button[data-save-emp]")?.classList.add("hidden");
-      row.querySelector("button[data-cancel-edit-emp]")?.classList.add("hidden");
-      return;
-    }
-
-    const saveBtn = event.target.closest("button[data-save-emp]");
-    if (saveBtn) {
-      const id = Number(saveBtn.dataset.saveEmp);
-      if (!id) return;
-
-      const payload = {
-        display_name: String(row.querySelector("input[data-edit-display-name]")?.value || "").trim(),
-        full_name: String(row.querySelector("input[data-edit-full-name]")?.value || "").trim(),
-        phone_number: String(row.querySelector("input[data-edit-phone]")?.value || "").trim(),
-        date_of_birth: String(row.querySelector("input[data-edit-dob]")?.value || "").trim(),
-        job_position: String(row.querySelector("input[data-edit-position]")?.value || "").trim(),
-        address: String(row.querySelector("input[data-edit-address]")?.value || "").trim(),
-      };
-
-      validateManagerEmployeeUpdate(payload);
-      await api(`/api/manager/employees/${id}`, {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      showToast("Đã cập nhật thông tin nhân viên");
-      await loadManagerEmployees();
-      return;
-    }
 
     const btn = event.target.closest("button[data-del-emp]");
     if (!btn) return;
