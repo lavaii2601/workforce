@@ -29,7 +29,14 @@ def main() -> int:
     run([str(venv_python), "-m", "pip", "install", "-r", str(root / "requirements.txt")])
 
     print("[quickstart] Starting app on http://127.0.0.1:5000")
-    run([str(venv_python), str(root / "start.py")])
+    try:
+        run([str(venv_python), str(root / "start.py")])
+    except KeyboardInterrupt:
+        print("\n[quickstart] Server stopped by user.")
+        return 0
+    except subprocess.CalledProcessError as exc:
+        print(f"[quickstart] App exited with code {exc.returncode}.")
+        return exc.returncode
     return 0
 
 
