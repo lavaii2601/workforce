@@ -2079,7 +2079,10 @@ function attachEvents() {
     generateManagerOneTimeQr().catch((e) => showToast(e.message, true))
   );
   $("#btn-save-manager-self-shifts").addEventListener("click", () => saveManagerSelfShifts().catch((e) => showToast(e.message, true)));
-  $("#btn-save-manager-schedule").addEventListener("click", () => saveManagerSchedule().catch((e) => showToast(e.message, true)));
+  const managerScheduleSaveHandler = () =>
+    saveManagerSchedule().catch((e) => showToast(e.message, true));
+  $("#btn-save-manager-schedule").addEventListener("click", managerScheduleSaveHandler);
+  $("#btn-save-manager-schedule-inline").addEventListener("click", managerScheduleSaveHandler);
   $("#btn-save-manager-staffing-rules").addEventListener("click", () =>
     saveManagerStaffingRules().catch((e) => showToast(e.message, true))
   );
