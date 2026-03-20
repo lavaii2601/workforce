@@ -464,6 +464,21 @@ body.no-scroll {
   background: #1e281f;
 }
 
+.sidebar-actions {
+  display: grid;
+  gap: 10px;
+}
+
+#btn-open-profile {
+  width: 100%;
+  min-height: 46px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.36);
+  background: rgba(255, 255, 255, 0.92);
+  color: #14372b;
+  font-weight: 700;
+}
+
 #btn-logout {
   width: 100%;
   min-height: 50px;
