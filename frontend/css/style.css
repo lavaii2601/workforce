@@ -10,6 +10,10 @@
   --shadow: 0 18px 45px rgba(8, 26, 19, 0.14);
   --radius-md: 14px;
   --radius-lg: 18px;
+  --control-h: 44px;
+  --space-1: 8px;
+  --space-2: 12px;
+  --space-3: 16px;
 }
 
 * {
@@ -250,7 +254,7 @@ body.no-scroll {
   overflow-y: auto;
   display: grid;
   grid-template-rows: auto 1fr auto;
-  gap: 12px;
+  gap: var(--space-2);
   padding: 18px 16px;
   border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
   background: linear-gradient(145deg, rgba(14, 125, 87, 0.96), rgba(17, 57, 45, 0.98));
@@ -422,7 +426,7 @@ body.no-scroll {
 
 .nav-links {
   display: grid;
-  gap: 10px;
+  gap: var(--space-1);
   align-content: start;
   grid-auto-rows: minmax(48px, auto);
 }
@@ -466,12 +470,12 @@ body.no-scroll {
 
 .sidebar-actions {
   display: grid;
-  gap: 10px;
+  gap: var(--space-1);
 }
 
 #btn-open-profile {
   width: 100%;
-  min-height: 46px;
+  min-height: var(--control-h);
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.36);
   background: rgba(255, 255, 255, 0.92);
@@ -481,7 +485,7 @@ body.no-scroll {
 
 #btn-logout {
   width: 100%;
-  min-height: 50px;
+  min-height: var(--control-h);
   border-radius: 12px;
   border: 1px solid rgba(186, 47, 53, 0.45);
   background: linear-gradient(145deg, #d44349, #b52c31);
@@ -495,7 +499,7 @@ body.no-scroll {
 
 .content {
   display: grid;
-  gap: 14px;
+  gap: var(--space-2);
   padding-top: 64px;
   width: 100%;
   margin: 0;
@@ -504,7 +508,7 @@ body.no-scroll {
 .content-head {
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
-  padding: 16px 18px;
+  padding: 14px 16px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.84));
   box-shadow: var(--shadow);
   display: flex;
@@ -525,7 +529,7 @@ body.no-scroll {
 }
 
 .panel {
-  padding: 18px 18px 16px;
+  padding: 16px;
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.93), rgba(255, 255, 255, 0.87));
@@ -544,12 +548,12 @@ body.no-scroll {
 .row {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: var(--space-2);
   align-items: center;
 }
 
 .row.compact {
-  gap: 6px;
+  gap: var(--space-1);
 }
 
 .columns {
@@ -862,7 +866,7 @@ body.no-scroll {
 .field-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
+  gap: var(--space-2);
 }
 
 label {
@@ -877,7 +881,7 @@ textarea,
 button {
   border-radius: 12px;
   border: 1px solid var(--line);
-  padding: 10px 13px;
+  padding: 10px 12px;
   font: inherit;
 }
 
@@ -907,7 +911,7 @@ button {
   color: #fff;
   font-weight: 700;
   cursor: pointer;
-  min-height: 44px;
+  min-height: var(--control-h);
 }
 
 button:hover {
@@ -926,7 +930,7 @@ button.danger {
 .list {
   margin-top: 10px;
   display: grid;
-  gap: 11px;
+  gap: 10px;
 }
 
 .list-item {
@@ -1034,7 +1038,7 @@ button.danger {
 #route-manager-employees strong,
 #route-manager-employees span,
 #route-manager-employees h3 {
-  font-family: "Times New Roman", Times, serif;
+  font-family: "Be Vietnam Pro", "Noto Sans", sans-serif;
 }
 
 #route-manager-employees .manager-employee-form,
@@ -1052,9 +1056,9 @@ button.danger {
 #route-manager-employees .manager-employee-item {
   display: grid;
   grid-template-columns: 122px minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: var(--space-2);
   align-items: center;
-  padding: 10px 12px;
+  padding: 12px;
 }
 
 .manager-employee-avatar {
