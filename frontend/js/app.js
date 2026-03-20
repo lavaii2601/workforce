@@ -1113,10 +1113,18 @@ function groupByEmployee(records) {
 }
 
 async function loadManagerSchedule() {
-  const [prefs, schedule] = await Promise.all([
+  const [prefs, schedule, employeePayload] = await Promise.all([
     api(`/api/manager/preferences?week_start=${encodeURIComponent(currentWeek())}`),
     api(`/api/manager/schedule?week_start=${encodeURIComponent(currentWeek())}`),
+    api("/api/manager/employees"),
   ]);
+
+  const fallbackEmployees = (employeePayload?.employees || [])
+    .filter((employee) => employee.is_active)
+    .map((employee) => ({
+      employee_id: Number(employee.id),
+      employee_name: employee.display_name,
+    }));
 
   await loadManagerStaffingRules();
   const assigned = new Set(
@@ -1149,17 +1157,20 @@ async function loadManagerSchedule() {
     row.className = `shift-row shift-idx-${shiftIndex % 6}`;
     const cells = weekDaysMeta()
       .map((meta) => {
-        const rows = prefs.filter(
+        const prefRows = prefs.filter(
           (p) => p.shift_code === shift.code && expandDays(p.day_of_week).includes(meta.day)
         );
-        const cellClass = rows.length ? "has-data" : "is-empty";
-        let content = `<span class="tt-empty">Không có đăng ký</span>`;
-        if (rows.length) {
+        const rows = prefRows.length ? prefRows : fallbackEmployees;
+        const hasAssignableRows = rows.length > 0;
+        const cellClass = hasAssignableRows ? "has-data" : "is-empty";
+        let content = `<span class="tt-empty">Không có nhân sự để phân công</span>`;
+        if (hasAssignableRows) {
           content = rows
             .map((p) => {
-              const key = `${p.employee_id}|${p.shift_code}|${meta.day}`;
+              const shiftCode = p.shift_code || shift.code;
+              const key = `${p.employee_id}|${shiftCode}|${meta.day}`;
               const checked = assigned.has(key) ? "checked" : "";
-              return `<label class="tt-checkbox"><input type="checkbox" data-eid="${p.employee_id}" data-shift="${p.shift_code}" data-day="${meta.day}" ${checked} /> ${p.employee_name}</label>`;
+              return `<label class="tt-checkbox"><input type="checkbox" data-eid="${p.employee_id}" data-shift="${shiftCode}" data-day="${meta.day}" ${checked} /> ${p.employee_name}</label>`;
             })
             .join("");
         }
