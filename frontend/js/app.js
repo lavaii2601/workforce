@@ -7,6 +7,7 @@ const state = {
   sidebarCollapsed: localStorage.getItem("wm_sidebar_collapsed") !== "0",
   profileAvatarDataUrl: "",
   oneTimeScan: null,
+  managerDailyQr: null,
 };
 
 const ceoBranchState = {
@@ -93,6 +94,13 @@ function formatDateTimeDisplay(raw) {
   }
   const [, yyyy, mm, dd, hh, min] = matched;
   return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+}
+
+function parseDbDateTimeToEpoch(raw) {
+  const text = String(raw || "").trim();
+  const matched = text.match(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/);
+  if (!matched) return Number.NaN;
+  return new Date(text.replace(" ", "T")).getTime();
 }
 
 function showToast(message, isError = false) {
@@ -456,8 +464,14 @@ async function renderRoute() {
     await loadManagerShiftAttendanceToday();
     $("#manager-attendance-one-time-meta").textContent =
       "Nhấn Tạo QR cho ngày hôm nay. Mỗi lần nhân viên quét sẽ nhận random key one-time riêng.";
+
+    if (isManagerDailyQrValid(state.managerDailyQr)) {
+      applyManagerDailyQr(state.managerDailyQr, { showToastSuccess: false });
+      return;
+    }
+
     try {
-      await generateManagerOneTimeQr();
+      await generateManagerOneTimeQr({ showToastSuccess: false });
     } catch (error) {
       const oneTimeQrImage = $("#manager-attendance-one-time-qr-image");
       if (oneTimeQrImage) {
@@ -486,6 +500,27 @@ async function renderRoute() {
     loadCeoUserBranchOptions();
     syncCeoUserRoleForm();
     await loadCeoUsers();
+  }
+}
+
+function isManagerDailyQrValid(payload) {
+  if (!payload || !payload.qr_image_data_url || !payload.expires_at) return false;
+  const expiresMs = parseDbDateTimeToEpoch(payload.expires_at);
+  if (Number.isNaN(expiresMs)) return false;
+  return expiresMs > Date.now() + 1000;
+}
+
+function applyManagerDailyQr(payload, { showToastSuccess = true } = {}) {
+  const imageNode = $("#manager-attendance-one-time-qr-image");
+  if (imageNode) {
+    imageNode.src = payload.qr_image_data_url || "";
+    imageNode.classList.toggle("hidden", !payload.qr_image_data_url);
+  }
+  $("#manager-attendance-one-time-meta").textContent =
+    `Đã tạo QR theo ngày | Hết hạn lúc: ${formatDateTimeDisplay(payload.expires_at)}`;
+  state.managerDailyQr = payload;
+  if (showToastSuccess) {
+    showToast("Da tao QR theo ngay");
   }
 }
 
@@ -643,18 +678,11 @@ async function loadMyAttendance(viewMode) {
   list.appendChild(fragment);
 }
 
-async function generateManagerOneTimeQr() {
+async function generateManagerOneTimeQr({ showToastSuccess = true } = {}) {
   const payload = await api("/api/manager/attendance-qr-one-time", {
     method: "POST",
   });
-  const imageNode = $("#manager-attendance-one-time-qr-image");
-  if (imageNode) {
-    imageNode.src = payload.qr_image_data_url || "";
-    imageNode.classList.toggle("hidden", !payload.qr_image_data_url);
-  }
-  $("#manager-attendance-one-time-meta").textContent =
-    `Đã tạo QR theo ngày | Hết hạn lúc: ${formatDateTimeDisplay(payload.expires_at)}`;
-  showToast("Da tao QR theo ngay");
+  applyManagerDailyQr(payload, { showToastSuccess });
 }
 
 function shiftAttendanceStatusLabel(status) {
@@ -1937,6 +1965,7 @@ async function logout() {
   }
   state.token = null;
   state.currentUser = null;
+  state.managerDailyQr = null;
   persistSession();
   setShellByAuth();
   window.location.hash = "";
