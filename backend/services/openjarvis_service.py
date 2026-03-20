@@ -1,4 +1,8 @@
 from datetime import datetime, timedelta
+import json
+import os
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 SHIFT_HOURS = {
     "S1": 4,
@@ -21,6 +25,33 @@ def should_trigger_jarvis(message):
         "nghỉ",
     ]
     return any(keyword in lower for keyword in keywords)
+
+
+def _as_float(value, default):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _as_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _openjarvis_config():
+    base_url = (os.getenv("OPENJARVIS_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
+    enabled = (os.getenv("OPENJARVIS_ENABLED") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    return {
+        "enabled": enabled,
+        "base_url": base_url,
+        "model": (os.getenv("OPENJARVIS_MODEL") or "qwen3:8b").strip(),
+        "temperature": _as_float(os.getenv("OPENJARVIS_TEMPERATURE"), 0.2),
+        "max_tokens": _as_int(os.getenv("OPENJARVIS_MAX_TOKENS"), 700),
+        "timeout_seconds": _as_float(os.getenv("OPENJARVIS_TIMEOUT_SECONDS"), 6.0),
+    }
 
 
 def _hours_by_employee_from_schedule(conn, week_start):
@@ -188,3 +219,67 @@ def generate_hr_anomaly_report(conn, question):
     lines.append(f"- Thoi diem tao bao cao: {datetime.utcnow().isoformat()}Z")
 
     return "\n".join(lines)
+
+
+def _call_openjarvis_chat(*, messages, config):
+    payload = {
+        "model": config["model"],
+        "messages": messages,
+        "temperature": config["temperature"],
+        "max_tokens": config["max_tokens"],
+        "stream": False,
+    }
+    req = urlrequest.Request(
+        f"{config['base_url']}/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with urlrequest.urlopen(req, timeout=config["timeout_seconds"]) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+
+    body = json.loads(raw)
+    choices = body.get("choices") or []
+    if not choices:
+        return None
+
+    message = choices[0].get("message") or {}
+    content = (message.get("content") or "").strip()
+    return content or None
+
+
+def generate_jarvis_response(conn, question):
+    local_report = generate_hr_anomaly_report(conn, question)
+    config = _openjarvis_config()
+    if not config["enabled"]:
+        return local_report
+
+    system_prompt = (
+        "Ban la OpenJarvis dong vai tro tro ly CEO cho he thong workforce manager. "
+        "Hay tom tat ngan gon, uu tien bat thuong nhan su, rui ro van hanh, va hanh dong de xuat. "
+        "Neu khong co bat thuong thi tra loi ro rang la on dinh."
+    )
+    user_prompt = (
+        "Nguoi dung hoi:\n"
+        f"{question}\n\n"
+        "Du lieu tong hop noi bo:\n"
+        f"{local_report}\n\n"
+        "Yeu cau tra loi: 1) Tong quan 2) Danh sach bat thuong 3) De xuat hanh dong ngan gon."
+    )
+
+    try:
+        ai_answer = _call_openjarvis_chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            config=config,
+        )
+        if ai_answer:
+            return ai_answer
+    except (urlerror.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        # Fall back to deterministic local report when OpenJarvis is unavailable.
+        pass
+
+    return local_report

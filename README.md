@@ -111,7 +111,18 @@ Mo trinh duyet: `http://127.0.0.1:5000`
 ## OpenJarvis trong chat CEO
 
 - Khi CEO nhap cau co tu khoa nhu `jarvis`, `bat thuong`, `nghi`, he thong se tao them 1 tin phan hoi tu OpenJarvis.
-- OpenJarvis hien tai phan tich tren du lieu `weekly_schedule`:
+- He thong uu tien goi OpenJarvis API (`/v1/chat/completions`) theo chuan OpenAI-compatible.
+- Neu OpenJarvis khong san sang, he thong tu dong fallback ve bao cao noi bo de khong lam gian doan chatbox.
+- OpenJarvis va fallback deu phan tich tren du lieu `weekly_schedule`:
 	- Nhan vien gio thap (< 12 gio/tuan).
 	- Nhan vien nghi lien tiep >= 2 tuan gan nhat.
 - Bao cao se chinh xac hon sau khi module cham cong duoc cap nhat du lieu check-in/check-out.
+
+### Cau hinh OpenJarvis (tu chon)
+
+- `OPENJARVIS_ENABLED` (mac dinh: `1`)
+- `OPENJARVIS_API_URL` (mac dinh: `http://127.0.0.1:8000`)
+- `OPENJARVIS_MODEL` (mac dinh: `qwen3:8b`)
+- `OPENJARVIS_TIMEOUT_SECONDS` (mac dinh: `6`)
+- `OPENJARVIS_TEMPERATURE` (mac dinh: `0.2`)
+- `OPENJARVIS_MAX_TOKENS` (mac dinh: `700`)

@@ -15,7 +15,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from .constants import SHIFT_CODE_SET, SHIFT_DEFINITIONS
 from .db import get_conn, init_db
 from .services.openjarvis_service import (
-    generate_hr_anomaly_report,
+    generate_jarvis_response,
     should_trigger_jarvis,
 )
 
@@ -2488,7 +2488,7 @@ def create_app():
         )
 
         if should_trigger_jarvis(message):
-            jarvis_message = generate_hr_anomaly_report(conn, message)
+            jarvis_message = generate_jarvis_response(conn, message)
             conn.execute(
                 """
                 INSERT INTO ceo_chat_messages(sender_id, sender_type, sender_label, message)
