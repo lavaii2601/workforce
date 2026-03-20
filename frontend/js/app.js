@@ -251,6 +251,7 @@ function setShellByAuth() {
   loginView.classList.toggle("hidden", loggedIn || authUiState.screen !== "login");
   changePasswordView.classList.toggle("hidden", loggedIn || authUiState.screen !== "change-password");
   $("#app-view").classList.toggle("hidden", !loggedIn);
+  $("#btn-open-profile")?.classList.toggle("hidden", !loggedIn);
 
   if (!loggedIn) {
     toggleProfileRequiredModal(false);
@@ -279,6 +280,7 @@ function setShellByAuth() {
     avatarNode.style.color = "#13412f";
   }
   applySidebarState();
+  applyProfileModalMode();
   toggleProfileRequiredModal(shouldRequireProfileCompletion());
   renderNav();
 }
@@ -292,6 +294,25 @@ function switchAuthScreen(screen) {
 
 function shouldRequireProfileCompletion() {
   return !!(state.currentUser && state.currentUser.needs_profile_completion);
+}
+
+function applyProfileModalMode() {
+  const isRequired = shouldRequireProfileCompletion();
+  const titleNode = $("#profile-modal-title");
+  const descNode = $("#profile-modal-desc");
+  const closeBtn = $("#btn-close-profile-modal");
+
+  if (titleNode) {
+    titleNode.textContent = isRequired ? "Hoàn thiện hồ sơ cá nhân" : "Cập nhật hồ sơ cá nhân";
+  }
+  if (descNode) {
+    descNode.textContent = isRequired
+      ? "Bạn cần cập nhật thông tin cá nhân trước khi sử dụng hệ thống."
+      : "Bạn có thể cập nhật avatar và thông tin cá nhân bất kỳ lúc nào.";
+  }
+  if (closeBtn) {
+    closeBtn.classList.toggle("hidden", isRequired);
+  }
 }
 
 function setProfileAvatarPreview(dataUrl) {
@@ -314,6 +335,18 @@ function toggleProfileRequiredModal(show) {
   const modal = $("#profile-required-modal");
   if (!modal) return;
   modal.classList.toggle("hidden", !show);
+}
+
+async function openProfileModal() {
+  if (!state.currentUser) return;
+  await loadProfileRequiredForm();
+  applyProfileModalMode();
+  toggleProfileRequiredModal(true);
+}
+
+function closeProfileModal() {
+  if (shouldRequireProfileCompletion()) return;
+  toggleProfileRequiredModal(false);
 }
 
 async function loadProfileRequiredForm() {
@@ -344,6 +377,7 @@ async function submitRequiredProfile() {
   state.currentUser = payload.user;
   persistSession();
   setShellByAuth();
+  applyProfileModalMode();
   toggleProfileRequiredModal(false);
   await renderRoute();
   showToast("Da cap nhat ho so ca nhan");
@@ -2057,9 +2091,13 @@ function attachEvents() {
     }
   });
   $("#btn-logout").addEventListener("click", () => logout().catch((e) => showToast(e.message, true)));
+  $("#btn-open-profile").addEventListener("click", () =>
+    openProfileModal().catch((e) => showToast(e.message, true))
+  );
   $("#btn-save-profile-required").addEventListener("click", () =>
     submitRequiredProfile().catch((e) => showToast(e.message, true))
   );
+  $("#btn-close-profile-modal").addEventListener("click", closeProfileModal);
   $("#profile-avatar-input").addEventListener("change", (event) => {
     const file = event.target.files?.[0];
     if (!file) return;

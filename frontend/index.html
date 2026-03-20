@@ -106,6 +106,7 @@
             <p id="sidebar-user" class="muted"></p>
           </div>
         </div>
+        <button id="btn-open-profile" class="ghost" type="button">Cập nhật hồ sơ</button>
         <nav id="nav-links" class="nav-links"></nav>
         <button id="btn-logout" class="ghost">Đăng xuất</button>
       </aside>
@@ -114,8 +115,8 @@
 
       <section id="profile-required-modal" class="profile-required hidden" aria-live="polite">
         <div class="profile-required-card">
-          <h3>Hoàn thiện hồ sơ cá nhân</h3>
-          <p class="muted">Bạn cần cập nhật thông tin cá nhân trước khi sử dụng hệ thống.</p>
+          <h3 id="profile-modal-title">Hoàn thiện hồ sơ cá nhân</h3>
+          <p id="profile-modal-desc" class="muted">Bạn cần cập nhật thông tin cá nhân trước khi sử dụng hệ thống.</p>
 
           <div class="profile-avatar-wrap">
             <img id="profile-avatar-preview" class="profile-avatar-preview hidden" alt="Avatar" />
@@ -140,6 +141,7 @@
 
           <div class="row compact">
             <button id="btn-save-profile-required">Lưu hồ sơ</button>
+            <button id="btn-close-profile-modal" class="ghost" type="button">Đóng</button>
           </div>
         </div>
       </section>
