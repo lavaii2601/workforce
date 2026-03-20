@@ -249,37 +249,91 @@ def _call_openjarvis_chat(*, messages, config):
     return content or None
 
 
-def generate_jarvis_response(conn, question):
-    local_report = generate_hr_anomaly_report(conn, question)
+def _should_include_hr_context(question):
+    lower = (question or "").lower()
+    hints = [
+        "bat thuong",
+        "bất thường",
+        "nhan su",
+        "nhân sự",
+        "ca lam",
+        "ca làm",
+        "cham cong",
+        "chấm công",
+        "vang",
+        "vắng",
+        "nghi",
+        "nghỉ",
+        "gio",
+        "giờ",
+        "branch",
+        "chi nhanh",
+        "chi nhánh",
+        "issue",
+        "bao cao",
+        "báo cáo",
+        "rủi ro",
+        "rui ro",
+    ]
+    return any(item in lower for item in hints)
+
+
+def _build_local_fallback(question, hr_context):
+    if hr_context:
+        return (
+            "OpenJarvis dang tam thoi khong san sang. Toi tra ve phan tich noi bo de CEO tiep tuc van hanh:\n\n"
+            f"{hr_context}"
+        )
+
+    return (
+        "OpenJarvis dang tam thoi khong ket noi duoc den model. "
+        "CEO co the tiep tuc hoi, hoac bo sung cau hoi lien quan nhan su/cham cong/chi nhanh "
+        "de toi phan tich du lieu noi bo ngay khi ket noi phuc hoi."
+    )
+
+
+def generate_jarvis_response(conn, question, chat_history=None):
+    include_hr_context = _should_include_hr_context(question)
+    hr_context = generate_hr_anomaly_report(conn, question) if include_hr_context else None
     config = _openjarvis_config()
     if not config["enabled"]:
-        return local_report
+        return _build_local_fallback(question, hr_context)
 
     system_prompt = (
         "Ban la OpenJarvis dong vai tro tro ly CEO cho he thong workforce manager. "
-        "Hay tom tat ngan gon, uu tien bat thuong nhan su, rui ro van hanh, va hanh dong de xuat. "
-        "Neu khong co bat thuong thi tra loi ro rang la on dinh."
-    )
-    user_prompt = (
-        "Nguoi dung hoi:\n"
-        f"{question}\n\n"
-        "Du lieu tong hop noi bo:\n"
-        f"{local_report}\n\n"
-        "Yeu cau tra loi: 1) Tong quan 2) Danh sach bat thuong 3) De xuat hanh dong ngan gon."
+        "Tro chuyen tu nhien nhu mot AI assistant, tra loi bang tieng Viet ro rang, ngan gon nhung day du. "
+        "Khi co du lieu van hanh thi dua ra nhan dinh va de xuat hanh dong cu the. "
+        "Duoc phep dung Markdown (tieu de, bullet, bang, code block) neu phu hop. "
+        "Khong duoc tu y biet du lieu ben ngoai he thong."
     )
 
-    try:
-        ai_answer = _call_openjarvis_chat(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            config=config,
+    messages = [{"role": "system", "content": system_prompt}]
+    for item in (chat_history or []):
+        role = (item.get("role") or "").strip().lower()
+        content = (item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        messages.append({"role": role, "content": content})
+
+    if include_hr_context and hr_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Day la du lieu noi bo cap nhat nhat de tham chieu khi nguoi dung hoi ve van hanh/nhan su:\n\n"
+                    f"{hr_context}"
+                ),
+            }
         )
+
+    messages.append({"role": "user", "content": question})
+
+    try:
+        ai_answer = _call_openjarvis_chat(messages=messages, config=config)
         if ai_answer:
             return ai_answer
     except (urlerror.URLError, TimeoutError, json.JSONDecodeError, ValueError):
-        # Fall back to deterministic local report when OpenJarvis is unavailable.
+        # Fall back to local response when OpenJarvis is unavailable.
         pass
 
-    return local_report
+    return _build_local_fallback(question, hr_context)

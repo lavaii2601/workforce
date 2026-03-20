@@ -78,6 +78,10 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function toSafeChatHtml(value) {
+  return escapeHtml(value || "").replaceAll("\n", "<br />");
+}
+
 function mondayOfCurrentWeekISO() {
   const now = new Date();
   const day = now.getDay();
@@ -1458,10 +1462,12 @@ async function loadCeoChat() {
   items.forEach((m) => {
     const row = document.createElement("div");
     const typeClass = m.sender_type === "jarvis" ? "jarvis" : "user";
-    const safeMessage = (m.message || "").trim().replaceAll("\n", "<br />");
+    const safeMessage = toSafeChatHtml((m.message || "").trim());
+    const safeSenderName = escapeHtml(m.sender_name || "Unknown");
+    const safeCreatedAt = escapeHtml(m.created_at || "-");
     row.className = `chat-message ${typeClass}`;
     row.innerHTML = `
-      <div class="chat-header"><span>${m.sender_name}</span><span>${m.created_at}</span></div>
+      <div class="chat-header"><span>${safeSenderName}</span><span>${safeCreatedAt}</span></div>
       <div class="chat-body">${safeMessage}</div>
     `;
     log.appendChild(row);

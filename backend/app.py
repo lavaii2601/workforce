@@ -16,7 +16,6 @@ from .constants import SHIFT_CODE_SET, SHIFT_DEFINITIONS
 from .db import get_conn, init_db
 from .services.openjarvis_service import (
     generate_jarvis_response,
-    should_trigger_jarvis,
 )
 
 
@@ -2487,15 +2486,37 @@ def create_app():
             (user["id"], user["display_name"], message),
         )
 
-        if should_trigger_jarvis(message):
-            jarvis_message = generate_jarvis_response(conn, message)
-            conn.execute(
-                """
-                INSERT INTO ceo_chat_messages(sender_id, sender_type, sender_label, message)
-                VALUES (?, 'jarvis', 'Tro ly tong hop', ?)
-                """,
-                (user["id"], jarvis_message),
-            )
+        history_rows = conn.execute(
+            """
+            SELECT sender_type, message
+            FROM ceo_chat_messages
+            ORDER BY id DESC
+            LIMIT 24
+            """
+        ).fetchall()
+
+        history = []
+        for row in reversed(history_rows):
+            sender_type = (row["sender_type"] or "").strip().lower()
+            if sender_type == "jarvis":
+                role = "assistant"
+            elif sender_type == "user":
+                role = "user"
+            else:
+                continue
+
+            text = (row["message"] or "").strip()
+            if text:
+                history.append({"role": role, "content": text})
+
+        jarvis_message = generate_jarvis_response(conn, message, chat_history=history)
+        conn.execute(
+            """
+            INSERT INTO ceo_chat_messages(sender_id, sender_type, sender_label, message)
+            VALUES (?, 'jarvis', 'OpenJarvis AI', ?)
+            """,
+            (user["id"], jarvis_message),
+        )
 
         conn.commit()
         conn.close()
