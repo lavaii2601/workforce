@@ -2,6 +2,8 @@ import secrets
 import csv
 import io
 import base64
+import json
+import os
 import re
 import hmac
 import hashlib
@@ -61,8 +63,52 @@ def create_app():
     PROFILE_REQUIRED_ROLES = {"employee", "manager"}
     ATTENDANCE_QR_ONE_TIME_TTL_SECONDS = 45
     ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
+    STATELESS_SESSION_SECRET = os.getenv("SESSION_TOKEN_SECRET", "workforce-session-secret")
     DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     SHIFT_DEFINITION_MAP = {item["code"]: item for item in SHIFT_DEFINITIONS}
+
+    def _is_stateless_session_enabled():
+        return os.getenv("VERCEL") == "1"
+
+    def _build_stateless_session_token(user_id):
+        expires_ts = int((datetime.utcnow() + timedelta(days=TOKEN_LIFETIME_DAYS)).timestamp())
+        payload_json = json.dumps({"uid": int(user_id), "exp": expires_ts}, separators=(",", ":"))
+        payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii").rstrip("=")
+        signature = hmac.new(
+            STATELESS_SESSION_SECRET.encode("utf-8"),
+            payload_b64.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"st1.{payload_b64}.{signature}", expires_ts
+
+    def _parse_stateless_session_token(token):
+        parts = (token or "").split(".")
+        if len(parts) != 3 or parts[0] != "st1":
+            return None, "Invalid token format"
+
+        payload_b64 = parts[1]
+        signature = parts[2]
+        expected_signature = hmac.new(
+            STATELESS_SESSION_SECRET.encode("utf-8"),
+            payload_b64.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            return None, "Invalid token signature"
+
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        try:
+            payload_raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+            payload = json.loads(payload_raw)
+            user_id = int(payload.get("uid"))
+            expires_ts = int(payload.get("exp"))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return None, "Invalid token payload"
+
+        if expires_ts < int(datetime.utcnow().timestamp()):
+            return None, "Token expired"
+
+        return {"user_id": user_id, "expires_ts": expires_ts}, None
 
     def _build_profile_payload(user_row):
         row = dict(user_row)
@@ -133,8 +179,37 @@ def create_app():
         ).fetchone()
 
         if not user:
-            conn.close()
-            return None, (jsonify({"error": "Invalid or expired session"}), 401)
+            # Vercel serverless may serve requests from different instances where
+            # SQLite session rows are not shared. Fallback to stateless token.
+            if _is_stateless_session_enabled() and token.startswith("st1."):
+                parsed, parse_error = _parse_stateless_session_token(token)
+                if parsed:
+                    user = conn.execute(
+                        """
+                        SELECT id,
+                               username,
+                               display_name,
+                               role,
+                               branch_id,
+                               is_active,
+                               avatar_data_url,
+                               full_name,
+                               date_of_birth,
+                               phone_number,
+                               address,
+                               job_position
+                        FROM users
+                        WHERE id = ?
+                        """,
+                        (parsed["user_id"],),
+                    ).fetchone()
+                else:
+                    conn.close()
+                    return None, (jsonify({"error": parse_error or "Invalid or expired session"}), 401)
+
+            if not user:
+                conn.close()
+                return None, (jsonify({"error": "Invalid or expired session"}), 401)
 
         user_dict = dict(user)
         if not user_dict.get("is_active", 1):
@@ -593,19 +668,24 @@ def create_app():
             conn.close()
             return jsonify({"error": "Invalid username or password"}), 401
 
-        expires_at = (datetime.utcnow() + timedelta(days=TOKEN_LIFETIME_DAYS)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        token = secrets.token_urlsafe(32)
+        if _is_stateless_session_enabled():
+            token, expires_ts = _build_stateless_session_token(user["id"])
+            expires_at = datetime.utcfromtimestamp(expires_ts).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            expires_at = (datetime.utcnow() + timedelta(days=TOKEN_LIFETIME_DAYS)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            token = secrets.token_urlsafe(32)
         conn.execute("DELETE FROM auth_sessions WHERE expires_at <= CURRENT_TIMESTAMP")
-        conn.execute(
-            "INSERT INTO auth_sessions(user_id, token, expires_at) VALUES (?, ?, ?)",
-            (user["id"], token, expires_at),
-        )
-        conn.execute(
-            "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
-            (user["id"], token),
-        )
+        if not _is_stateless_session_enabled():
+            conn.execute(
+                "INSERT INTO auth_sessions(user_id, token, expires_at) VALUES (?, ?, ?)",
+                (user["id"], token, expires_at),
+            )
+            conn.execute(
+                "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
+                (user["id"], token),
+            )
         conn.commit()
         conn.close()
 
@@ -683,6 +763,10 @@ def create_app():
         token = _get_access_token()
         if not token:
             return jsonify({"message": "No active token"})
+
+        if _is_stateless_session_enabled() and token.startswith("st1."):
+            # Stateless tokens cannot be revoked without shared storage.
+            return jsonify({"message": "Logged out"})
 
         conn = get_conn()
         conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
