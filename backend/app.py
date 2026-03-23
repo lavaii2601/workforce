@@ -9,13 +9,15 @@ import hmac
 import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Lock
 
 import qrcode
 from flask import Flask, Response, jsonify, request, send_from_directory
+from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .constants import SHIFT_CODE_SET, SHIFT_DEFINITIONS
-from .db import get_conn, init_db
+from .db import get_conn, init_db, is_postgres_backend
 from .services.openjarvis_service import (
     generate_jarvis_response,
 )
@@ -23,6 +25,8 @@ from .services.openjarvis_service import (
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 TOKEN_LIFETIME_DAYS = 7
+DEFAULT_STATELESS_SESSION_SECRET = "workforce-session-secret"
+DEFAULT_ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
 
 ROLE_PERMISSIONS = {
     "employee": [
@@ -58,17 +62,107 @@ ROLE_PERMISSIONS = {
 
 def create_app():
     app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="")
+    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
     init_db()
 
     PROFILE_REQUIRED_ROLES = {"employee", "manager"}
     ATTENDANCE_QR_ONE_TIME_TTL_SECONDS = 45
-    ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
-    STATELESS_SESSION_SECRET = os.getenv("SESSION_TOKEN_SECRET", "workforce-session-secret")
+    ATTENDANCE_QR_SECRET = os.getenv("ATTENDANCE_QR_SECRET", DEFAULT_ATTENDANCE_QR_SECRET)
+    STATELESS_SESSION_SECRET = os.getenv("SESSION_TOKEN_SECRET", DEFAULT_STATELESS_SESSION_SECRET)
     DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     SHIFT_DEFINITION_MAP = {item["code"]: item for item in SHIFT_DEFINITIONS}
+    LOGIN_WINDOW_SECONDS = 10 * 60
+    LOGIN_MAX_FAILURES = 5
+    login_attempts_lock = Lock()
+    login_attempts = {}
+
+    def _prune_login_attempts(now_ts):
+        stale_keys = [key for key, values in login_attempts.items() if values and values[-1] < now_ts - LOGIN_WINDOW_SECONDS]
+        for key in stale_keys:
+            del login_attempts[key]
+
+    def _is_login_rate_limited(client_ip, username):
+        now_ts = int(datetime.utcnow().timestamp())
+        key = f"{client_ip}:{(username or '').lower()}"
+        with login_attempts_lock:
+            _prune_login_attempts(now_ts)
+            attempts = [ts for ts in login_attempts.get(key, []) if ts >= now_ts - LOGIN_WINDOW_SECONDS]
+            login_attempts[key] = attempts
+            return len(attempts) >= LOGIN_MAX_FAILURES
+
+    def _record_login_failure(client_ip, username):
+        now_ts = int(datetime.utcnow().timestamp())
+        key = f"{client_ip}:{(username or '').lower()}"
+        with login_attempts_lock:
+            attempts = [ts for ts in login_attempts.get(key, []) if ts >= now_ts - LOGIN_WINDOW_SECONDS]
+            attempts.append(now_ts)
+            login_attempts[key] = attempts
+
+    def _clear_login_failures(client_ip, username):
+        key = f"{client_ip}:{(username or '').lower()}"
+        with login_attempts_lock:
+            if key in login_attempts:
+                del login_attempts[key]
+
+    @app.before_request
+    def _reject_invalid_json_requests():
+        if not request.path.startswith("/api/"):
+            return None
+
+        if request.method in {"POST", "PUT", "PATCH"}:
+            content_type = (request.headers.get("Content-Type") or "").lower()
+            if content_type and "application/json" not in content_type:
+                return jsonify({"error": "Content-Type must be application/json"}), 415
+        return None
+
+    @app.after_request
+    def _set_security_headers(response):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        if os.getenv("VERCEL") == "1":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        response.headers["Content-Security-Policy"] = csp
+        return response
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def _handle_request_too_large(_error):
+        return jsonify({"error": "Payload too large"}), 413
 
     def _is_stateless_session_enabled():
-        return os.getenv("VERCEL") == "1"
+        if os.getenv("STATELESS_SESSION") == "1":
+            return True
+        # On Vercel + Postgres, DB-backed sessions are safer and revocable.
+        return os.getenv("VERCEL") == "1" and not is_postgres_backend()
+
+    def _is_weak_secret(secret_value, default_value):
+        text = (secret_value or "").strip()
+        return len(text) < 32 or text == default_value
+
+    def _hash_session_token(raw_token):
+        return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    if _is_stateless_session_enabled() and _is_weak_secret(STATELESS_SESSION_SECRET, DEFAULT_STATELESS_SESSION_SECRET):
+        raise RuntimeError(
+            "SESSION_TOKEN_SECRET must be set to a strong random value (>=32 chars) when stateless sessions are enabled"
+        )
+    if os.getenv("VERCEL") == "1" and _is_weak_secret(ATTENDANCE_QR_SECRET, DEFAULT_ATTENDANCE_QR_SECRET):
+        raise RuntimeError(
+            "ATTENDANCE_QR_SECRET must be set to a strong random value (>=32 chars) on Vercel"
+        )
 
     def _build_stateless_session_token(user_id):
         expires_ts = int((datetime.utcnow() + timedelta(days=TOKEN_LIFETIME_DAYS)).timestamp())
@@ -154,6 +248,8 @@ def create_app():
                 return None, (jsonify({"error": "Missing access token"}), 401)
             return None, None
 
+        token_hash = _hash_session_token(token)
+
         conn = get_conn()
         user = conn.execute(
             """
@@ -175,7 +271,7 @@ def create_app():
             WHERE s.token = ?
               AND s.expires_at > CURRENT_TIMESTAMP
             """,
-            (token,),
+                        (token_hash,),
         ).fetchone()
 
         if not user:
@@ -213,7 +309,7 @@ def create_app():
 
         user_dict = dict(user)
         if not user_dict.get("is_active", 1):
-            conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token_hash,))
             conn.commit()
             conn.close()
             return None, (jsonify({"error": "User is inactive"}), 403)
@@ -425,6 +521,51 @@ def create_app():
                 details,
             ),
         )
+
+    def _audit_text(value, empty_label="chua cap nhat"):
+        text = (value or "").strip()
+        return text if text else empty_label
+
+    def _build_branch_create_audit_details(name, location, network_ip):
+        return (
+            f"Da tao chi nhanh \"{name}\". "
+            f"Dia diem: {_audit_text(location)}. "
+            f"IP router: {_audit_text(network_ip, 'chua cau hinh')}."
+        )
+
+    def _build_branch_update_audit_details(branch_before, *, name, location, network_ip):
+        old_name = (branch_before["name"] or "").strip()
+        old_location = (branch_before["location"] or "").strip()
+        old_network_ip = (branch_before["network_ip"] or "").strip()
+
+        new_name = (name or "").strip()
+        new_location = (location or "").strip()
+        new_network_ip = (network_ip or "").strip()
+
+        changes = []
+        if old_name != new_name:
+            changes.append(f"Doi ten tu \"{_audit_text(old_name)}\" sang \"{_audit_text(new_name)}\".")
+        if old_location != new_location:
+            changes.append(
+                f"Cap nhat dia diem tu \"{_audit_text(old_location)}\" sang \"{_audit_text(new_location)}\"."
+            )
+        if old_network_ip != new_network_ip:
+            changes.append(
+                "Cap nhat IP router "
+                f"tu \"{_audit_text(old_network_ip, 'chua cau hinh')}\" "
+                f"sang \"{_audit_text(new_network_ip, 'chua cau hinh')}\"."
+            )
+
+        if not changes:
+            return f"Da mo cap nhat cho chi nhanh \"{_audit_text(new_name)}\" nhung khong co thay doi du lieu."
+
+        return f"Cap nhat chi nhanh \"{_audit_text(new_name)}\": " + " ".join(changes)
+
+    def _build_branch_delete_audit_details(branch_before):
+        name = _audit_text(branch_before["name"])
+        location = _audit_text(branch_before["location"])
+        network_ip = _audit_text(branch_before["network_ip"], "chua cau hinh")
+        return f"Da xoa chi nhanh \"{name}\". Dia diem cu: {location}. IP router cu: {network_ip}."
 
     def _normalize_day_of_week(value, *, allow_zero=False):
         try:
@@ -642,6 +783,10 @@ def create_app():
         if not password:
             return jsonify({"error": "password is required"}), 400
 
+        client_ip = _get_client_ip()
+        if _is_login_rate_limited(client_ip, username):
+            return jsonify({"error": "Too many failed login attempts. Please try again later."}), 429
+
         conn = get_conn()
         user = conn.execute(
             """
@@ -666,12 +811,14 @@ def create_app():
 
         if not user:
             conn.close()
-            return jsonify({"error": "User not found"}), 404
+            _record_login_failure(client_ip, username)
+            return jsonify({"error": "Invalid username or password"}), 401
         if not user["is_active"]:
             conn.close()
             return jsonify({"error": "User is inactive"}), 403
         if not user["password_hash"] or not check_password_hash(user["password_hash"], password):
             conn.close()
+            _record_login_failure(client_ip, username)
             return jsonify({"error": "Invalid username or password"}), 401
 
         if _is_stateless_session_enabled():
@@ -682,18 +829,20 @@ def create_app():
                 "%Y-%m-%d %H:%M:%S"
             )
             token = secrets.token_urlsafe(32)
+        token_hash = _hash_session_token(token)
         conn.execute("DELETE FROM auth_sessions WHERE expires_at <= CURRENT_TIMESTAMP")
         if not _is_stateless_session_enabled():
             conn.execute(
                 "INSERT INTO auth_sessions(user_id, token, expires_at) VALUES (?, ?, ?)",
-                (user["id"], token, expires_at),
+                (user["id"], token_hash, expires_at),
             )
             conn.execute(
                 "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
-                (user["id"], token),
+                (user["id"], token_hash),
             )
         conn.commit()
         conn.close()
+        _clear_login_failures(client_ip, username)
 
         user_payload = {
             "id": user["id"],
@@ -735,6 +884,10 @@ def create_app():
         if new_password == current_password:
             return jsonify({"error": "Mật khẩu mới phải khác mật khẩu hiện tại"}), 400
 
+        client_ip = _get_client_ip()
+        if _is_login_rate_limited(client_ip, username):
+            return jsonify({"error": "Too many failed attempts. Please try again later."}), 429
+
         conn = get_conn()
         user = conn.execute(
             """
@@ -747,12 +900,14 @@ def create_app():
 
         if not user:
             conn.close()
-            return jsonify({"error": "User not found"}), 404
+            _record_login_failure(client_ip, username)
+            return jsonify({"error": "Invalid username or password"}), 401
         if not user["is_active"]:
             conn.close()
             return jsonify({"error": "User is inactive"}), 403
         if not user["password_hash"] or not check_password_hash(user["password_hash"], current_password):
             conn.close()
+            _record_login_failure(client_ip, username)
             return jsonify({"error": "Mật khẩu hiện tại không đúng"}), 401
 
         conn.execute(
@@ -762,6 +917,7 @@ def create_app():
         conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user["id"],))
         conn.commit()
         conn.close()
+        _clear_login_failures(client_ip, username)
         return jsonify({"message": "Đổi mật khẩu thành công. Vui lòng đăng nhập lại."})
 
     @app.post("/api/logout")
@@ -774,8 +930,9 @@ def create_app():
             # Stateless tokens cannot be revoked without shared storage.
             return jsonify({"message": "Logged out"})
 
+        token_hash = _hash_session_token(token)
         conn = get_conn()
-        conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token_hash,))
         conn.commit()
         conn.close()
         return jsonify({"message": "Logged out"})
@@ -2924,7 +3081,7 @@ def create_app():
             action="branch.create",
             target_type="branch",
             target_id=cur.lastrowid,
-            details=f"Created branch: {name} | location: {location or '-'}",
+            details=_build_branch_create_audit_details(name, location, network_ip),
         )
         conn.commit()
         conn.close()
@@ -2972,10 +3129,11 @@ def create_app():
             action="branch.update",
             target_type="branch",
             target_id=branch_id,
-            details=(
-                "Updated branch "
-                f"from name='{branch['name']}', location='{branch['location'] or '-'}' "
-                f"to name='{name}', location='{location or '-'}', network_ip='{network_ip or '-'}'"
+            details=_build_branch_update_audit_details(
+                branch,
+                name=name,
+                location=location,
+                network_ip=network_ip,
             ),
         )
         conn.commit()
@@ -3075,7 +3233,7 @@ def create_app():
             action="branch.delete",
             target_type="branch",
             target_id=branch_id,
-            details=f"Deleted branch: {branch['name']}",
+            details=_build_branch_delete_audit_details(branch),
         )
         conn.commit()
         conn.close()
@@ -3170,4 +3328,5 @@ def create_app():
 
 
 if __name__ == "__main__":
-    create_app().run(host="0.0.0.0", port=5000, debug=True)
+    debug_enabled = os.getenv("FLASK_DEBUG") == "1"
+    create_app().run(host="0.0.0.0", port=5000, debug=debug_enabled)

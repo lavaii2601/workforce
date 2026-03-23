@@ -61,6 +61,27 @@ python start.py
 
 Mo trinh duyet: `http://127.0.0.1:5000`
 
+## Reset database thu cong
+
+Neu ban muon xoa sach du lieu va tao moi hoan toan, dung script rieng:
+
+```bash
+python reset_database.py
+```
+
+Script nay chi chay khi ban goi thu cong, khong duoc goi tu `start.py` hoac `quickstart.py`.
+
+Neu muon bo qua buoc xac nhan:
+
+```bash
+python reset_database.py --yes
+```
+
+Ket qua sau reset:
+
+- Tao lai schema day du.
+- Seed tai khoan CEO mac dinh theo logic hien tai.
+
 ## Kien truc nhanh
 
 - Backend: Flask + SQLite (`data.db`) + REST API.
@@ -91,6 +112,13 @@ Du an da duoc toi uu de chay tren Vercel voi Flask serverless.
 
 Neu can ben vung du lieu production, nen doi sang DB ngoai (Postgres/MySQL/Supabase/Neon).
 
+### Bao mat + Vercel (khuyen nghi)
+
+- Tren Vercel, neu co `DATABASE_URL` (Postgres), he thong se uu tien session luu trong DB (an toan hon va co the revoke).
+- Chi nen dung stateless session khi that su can thiet (ho tro bang `STATELESS_SESSION=1`).
+- Khi stateless session bat, bat buoc dat `SESSION_TOKEN_SECRET` manh (>= 32 ky tu random), neu khong app se tu choi khoi dong de tranh token de doan.
+- Tren Vercel, bat buoc dat `ATTENDANCE_QR_SECRET` manh (>= 32 ky tu random), neu khong app se tu choi khoi dong.
+
 ### Cau hinh de du lieu ben vung tren Vercel (khuyen nghi)
 
 1. Tao 1 Postgres database (Neon/Supabase/Railway/Postgres bat ky).
@@ -106,6 +134,11 @@ Neu khong co, he thong fallback sang SQLite (phu hop local/dev, khong phu hop pr
 - `SQLITE_PATH`: ghi de duong dan file SQLite (uu tien cao nhat).
 - `DATABASE_URL`: chuoi ket noi Postgres (uu tien cao nhat, dung cho production).
 - `SUPABASE_DATABASE_URL`: fallback khi ban muon dat rieng connection string Supabase.
+- Bao mat:
+	- `SESSION_TOKEN_SECRET`: secret ky token phien dang nhap (nen dat chuoi dai, random).
+	- `ATTENDANCE_QR_SECRET`: secret ky QR cham cong (nen khac voi secret khac).
+	- `STATELESS_SESSION`: dat `1` neu ban muon bat stateless token tren moi truong khong dung DB session.
+	- `FLASK_DEBUG`: de `0` trong production (mac dinh an toan).
 - Nhom OpenJarvis (neu dung):
 	- `OPENJARVIS_ENABLED`
 	- `OPENJARVIS_API_URL`

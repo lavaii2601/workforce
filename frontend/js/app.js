@@ -1548,6 +1548,55 @@ function renderAuditPagination() {
   nextBtn.disabled = ceoBranchAuditState.page >= ceoBranchAuditState.totalPages;
 }
 
+function auditActionLabel(action) {
+  if (action === "branch.create") return "Tạo chi nhánh";
+  if (action === "branch.update") return "Cập nhật chi nhánh";
+  if (action === "branch.delete") return "Xóa chi nhánh";
+  return action || "Thao tác";
+}
+
+function prettifyLegacyBranchAuditDetail(action, rawDetails) {
+  const details = String(rawDetails || "").trim();
+  if (!details) return "";
+
+  if (action === "branch.create") {
+    const created = details.match(/^Created branch:\s*(.*?)\s*\|\s*location:\s*(.*)$/i);
+    if (created) {
+      const name = created[1] || "chua cap nhat";
+      const location = created[2] || "chua cap nhat";
+      return `Da tao chi nhanh "${name}". Dia diem: ${location}.`;
+    }
+  }
+
+  if (action === "branch.delete") {
+    const deleted = details.match(/^Deleted branch:\s*(.*)$/i);
+    if (deleted) {
+      const name = deleted[1] || "chua cap nhat";
+      return `Da xoa chi nhanh "${name}".`;
+    }
+  }
+
+  if (action === "branch.update") {
+    const updated = details.match(
+      /^Updated branch from name='([^']*)',\s*location='([^']*)'\s*to name='([^']*)',\s*location='([^']*)',\s*network_ip='([^']*)'$/i,
+    );
+    if (updated) {
+      const oldName = updated[1] || "chua cap nhat";
+      const oldLocation = updated[2] || "chua cap nhat";
+      const newName = updated[3] || "chua cap nhat";
+      const newLocation = updated[4] || "chua cap nhat";
+      const newIp = updated[5] || "chua cau hinh";
+      return `Cap nhat chi nhanh "${newName}": doi ten tu "${oldName}" sang "${newName}". Cap nhat dia diem tu "${oldLocation}" sang "${newLocation}". IP router hien tai: ${newIp}.`;
+    }
+  }
+
+  return details;
+}
+
+function toAuditDetailHtml(details) {
+  return escapeHtml(details || "").replaceAll("\n", "<br />");
+}
+
 async function loadBranchAuditLogs() {
   const params = new URLSearchParams({
     page: String(ceoBranchAuditState.page),
@@ -1562,15 +1611,16 @@ async function loadBranchAuditLogs() {
   list.innerHTML = "";
 
   (payload.items || []).forEach((item) => {
+    const readableDetails = prettifyLegacyBranchAuditDetail(item.action, item.details);
     const row = document.createElement("div");
     row.className = "list-item audit-item";
     row.innerHTML = `
       <div>
-        <strong>${item.action}</strong><br />
-        <small>${item.details || ""}</small>
+        <strong>${auditActionLabel(item.action)}</strong><br />
+        <small>${toAuditDetailHtml(readableDetails)}</small>
       </div>
       <div>
-        <small>${item.actor_username || "system"}<br />${item.created_at}</small>
+        <small>${escapeHtml(item.actor_username || "system")}<br />${formatDateTimeDisplay(item.created_at)}</small>
       </div>
     `;
     list.appendChild(row);
