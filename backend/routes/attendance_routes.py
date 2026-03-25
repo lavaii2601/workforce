@@ -22,6 +22,20 @@ def register_attendance_routes(app, deps):
     generate_one_time_attendance_code = deps["_generate_one_time_attendance_code"]
 
     attendance_qr_one_time_ttl_seconds = deps["ATTENDANCE_QR_ONE_TIME_TTL_SECONDS"]
+    attendance_qr_enabled = deps.get("ATTENDANCE_QR_ENABLED", True)
+
+    def _ensure_attendance_qr_enabled():
+        if attendance_qr_enabled:
+            return None
+        return (
+            jsonify(
+                {
+                    "error": "Attendance QR is disabled because ATTENDANCE_QR_SECRET is missing or weak on Vercel",
+                    "required_env": "ATTENDANCE_QR_SECRET",
+                }
+            ),
+            503,
+        )
 
     @app.post("/api/attendance/check-in")
     def attendance_check_in():
@@ -151,6 +165,10 @@ def register_attendance_routes(app, deps):
 
     @app.post("/api/manager/attendance-qr-one-time")
     def manager_attendance_qr_one_time():
+        qr_disabled = _ensure_attendance_qr_enabled()
+        if qr_disabled:
+            return qr_disabled
+
         user, error = get_user_from_token(roles={"manager"})
         if error:
             return error
@@ -193,6 +211,10 @@ def register_attendance_routes(app, deps):
 
     @app.post("/api/attendance/check-in-qr-one-time")
     def attendance_check_in_qr_one_time():
+        qr_disabled = _ensure_attendance_qr_enabled()
+        if qr_disabled:
+            return qr_disabled
+
         user, error = get_user_from_token(roles={"employee"})
         if error:
             return error
@@ -389,6 +411,10 @@ def register_attendance_routes(app, deps):
 
     @app.post("/api/attendance/scan-qr-one-time")
     def attendance_scan_qr_one_time():
+        qr_disabled = _ensure_attendance_qr_enabled()
+        if qr_disabled:
+            return qr_disabled
+
         user, error = get_user_from_token(roles={"employee"})
         if error:
             return error
