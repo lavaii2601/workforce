@@ -69,12 +69,17 @@ def create_app():
     ATTENDANCE_QR_ONE_TIME_TTL_SECONDS = 45
     ATTENDANCE_QR_SECRET = os.getenv("ATTENDANCE_QR_SECRET", DEFAULT_ATTENDANCE_QR_SECRET)
     STATELESS_SESSION_SECRET = os.getenv("SESSION_TOKEN_SECRET", DEFAULT_STATELESS_SESSION_SECRET)
+    IS_VERCEL = os.getenv("VERCEL") == "1"
     DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     SHIFT_DEFINITION_MAP = {item["code"]: item for item in SHIFT_DEFINITIONS}
     LOGIN_WINDOW_SECONDS = 10 * 60
     LOGIN_MAX_FAILURES = 5
     login_attempts_lock = Lock()
     login_attempts = {}
+
+    stateful_sessions_on_vercel = IS_VERCEL and not is_postgres_backend()
+    stateless_session_enabled = os.getenv("STATELESS_SESSION") == "1" or stateful_sessions_on_vercel
+    attendance_qr_enabled = True
 
     def _prune_login_attempts(now_ts):
         stale_keys = [key for key, values in login_attempts.items() if values and values[-1] < now_ts - LOGIN_WINDOW_SECONDS]
@@ -143,10 +148,7 @@ def create_app():
         return jsonify({"error": "Payload too large"}), 413
 
     def _is_stateless_session_enabled():
-        if os.getenv("STATELESS_SESSION") == "1":
-            return True
-        # On Vercel + Postgres, DB-backed sessions are safer and revocable.
-        return os.getenv("VERCEL") == "1" and not is_postgres_backend()
+        return stateless_session_enabled
 
     def _is_weak_secret(secret_value, default_value):
         text = (secret_value or "").strip()
@@ -155,13 +157,17 @@ def create_app():
     def _hash_session_token(raw_token):
         return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
-    if _is_stateless_session_enabled() and _is_weak_secret(STATELESS_SESSION_SECRET, DEFAULT_STATELESS_SESSION_SECRET):
-        raise RuntimeError(
-            "SESSION_TOKEN_SECRET must be set to a strong random value (>=32 chars) when stateless sessions are enabled"
+    if stateless_session_enabled and _is_weak_secret(STATELESS_SESSION_SECRET, DEFAULT_STATELESS_SESSION_SECRET):
+        stateless_session_enabled = False
+        app.logger.warning(
+            "SESSION_TOKEN_SECRET is weak or missing; falling back to DB-backed sessions. "
+            "Set SESSION_TOKEN_SECRET (>=32 chars) and optionally STATELESS_SESSION=1 to re-enable stateless sessions."
         )
-    if os.getenv("VERCEL") == "1" and _is_weak_secret(ATTENDANCE_QR_SECRET, DEFAULT_ATTENDANCE_QR_SECRET):
-        raise RuntimeError(
-            "ATTENDANCE_QR_SECRET must be set to a strong random value (>=32 chars) on Vercel"
+    if IS_VERCEL and _is_weak_secret(ATTENDANCE_QR_SECRET, DEFAULT_ATTENDANCE_QR_SECRET):
+        attendance_qr_enabled = False
+        app.logger.warning(
+            "ATTENDANCE_QR_SECRET is weak or missing on Vercel; attendance QR endpoints are disabled. "
+            "Set ATTENDANCE_QR_SECRET (>=32 chars) to re-enable QR attendance."
         )
 
     def _build_stateless_session_token(user_id):
