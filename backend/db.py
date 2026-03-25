@@ -40,7 +40,17 @@ def _resolve_database_url():
     return ""
 
 
-DATABASE_URL = _resolve_database_url()
+def _ensure_sslmode(url):
+    """Append sslmode=require if not already present — required by Supabase."""
+    if not url:
+        return url
+    if "sslmode" in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}sslmode=require"
+
+
+DATABASE_URL = _ensure_sslmode(_resolve_database_url())
 IS_POSTGRES = bool(DATABASE_URL)
 
 
@@ -151,9 +161,9 @@ def _resolve_db_path():
 DB_PATH = _resolve_db_path()
 
 
-def get_conn():
+def get_conn(*, autocommit=False):
     if IS_POSTGRES:
-        pg_conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        pg_conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=autocommit)
         return _PgConnAdapter(pg_conn)
 
     conn = sqlite3.connect(DB_PATH)
@@ -163,7 +173,15 @@ def get_conn():
 
 
 def init_db():
-    conn = get_conn()
+    try:
+        _init_db_inner()
+    except Exception as exc:
+        print(f"WARNING: Cannot initialize database: {exc}")
+        print("App will continue running but database may not be ready.")
+
+
+def _init_db_inner():
+    conn = get_conn(autocommit=IS_POSTGRES)
     cur = conn.cursor()
 
     schema_sql = """
@@ -397,7 +415,8 @@ def init_db():
         _run_migrations(conn)
 
     seed_data(conn)
-    conn.commit()
+    if not IS_POSTGRES:
+        conn.commit()
     conn.close()
 
 
