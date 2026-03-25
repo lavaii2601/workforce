@@ -12,21 +12,6 @@ SHIFT_HOURS = {
 }
 
 
-def should_trigger_jarvis(message):
-    lower = (message or "").lower()
-    keywords = [
-        "jarvis",
-        "openjarvis",
-        "bat thuong",
-        "bất thường",
-        "it hon",
-        "ít hơn",
-        "nghi",
-        "nghỉ",
-    ]
-    return any(keyword in lower for keyword in keywords)
-
-
 def _as_float(value, default):
     try:
         return float(value)
