@@ -1,7 +1,9 @@
 import os
 import re
+import socket
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlparse
 
 import psycopg
 from psycopg.rows import dict_row
@@ -50,7 +52,42 @@ def _ensure_sslmode(url):
     return f"{url}{separator}sslmode=require"
 
 
-DATABASE_URL = _ensure_sslmode(_resolve_database_url())
+def _resolve_host_to_ipv4(hostname):
+    """Resolve hostname to an IPv4 address.
+
+    Vercel Lambda does not support IPv6 outbound connections.
+    Supabase DNS may return an IPv6 (AAAA) record which causes
+    'Cannot assign requested address' errors on Vercel.
+    """
+    try:
+        results = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
+        if results:
+            return results[0][4][0]
+    except (socket.gaierror, OSError, IndexError):
+        pass
+    return None
+
+
+def _prepare_database_url(url):
+    """Prepare a DATABASE_URL for serverless deployment.
+
+    1. Ensure sslmode=require (Supabase requirement)
+    2. Add connect_timeout for cold starts
+    """
+    if not url:
+        return url
+
+    url = _ensure_sslmode(url)
+
+    # Add connect_timeout if missing
+    if "connect_timeout" not in url:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}connect_timeout=10"
+
+    return url
+
+
+DATABASE_URL = _prepare_database_url(_resolve_database_url())
 IS_POSTGRES = bool(DATABASE_URL)
 
 
@@ -163,7 +200,22 @@ DB_PATH = _resolve_db_path()
 
 def get_conn(*, autocommit=False):
     if IS_POSTGRES:
-        pg_conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=autocommit)
+        connect_kwargs = {
+            "conninfo": DATABASE_URL,
+            "row_factory": dict_row,
+            "autocommit": autocommit,
+        }
+        # Resolve hostname to IPv4 — Vercel Lambda does not support IPv6
+        try:
+            parsed = urlparse(DATABASE_URL)
+            hostname = parsed.hostname
+            if hostname:
+                ipv4 = _resolve_host_to_ipv4(hostname)
+                if ipv4:
+                    connect_kwargs["hostaddr"] = ipv4
+        except Exception:
+            pass
+        pg_conn = psycopg.connect(**connect_kwargs)
         return _PgConnAdapter(pg_conn)
 
     conn = sqlite3.connect(DB_PATH)
