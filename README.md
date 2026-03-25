@@ -162,16 +162,17 @@ python reset_database.py --yes
 - Entrypoint serverless: `api/index.py`.
 - Rewrite route: `vercel.json`.
 - KHUYEN NGHI production:
-	- Dung Postgres va set `DATABASE_URL`.
+	- Dung Vercel Postgres (hoac Postgres bat ky) va set `DATABASE_URL`.
 	- Set secret manh:
 		- `SESSION_TOKEN_SECRET` (>=32 ky tu)
 		- `ATTENDANCE_QR_SECRET` (>=32 ky tu)
 
 Neu dung SQLite tren Vercel: du lieu o `/tmp`, khong ben vung giua cold start/redeploy.
+Vi vay khong the luu DB lau dai tren Vercel bang file SQLite.
 
 ## 11) Bien moi truong quan trong
 
-- DB: `DATABASE_URL`, `SUPABASE_DATABASE_URL`, `SQLITE_PATH`.
+- DB: `DATABASE_URL`, `POSTGRES_URL`, `POSTGRES_PRISMA_URL`, `POSTGRES_URL_NON_POOLING`, `SQLITE_PATH`.
 - Session/security: `STATELESS_SESSION`, `SESSION_TOKEN_SECRET`, `ATTENDANCE_QR_SECRET`, `FLASK_DEBUG`.
 - OpenJarvis: `OPENJARVIS_ENABLED`, `OPENJARVIS_API_URL`, `OPENJARVIS_MODEL`, `OPENJARVIS_TIMEOUT_SECONDS`, `OPENJARVIS_TEMPERATURE`, `OPENJARVIS_MAX_TOKENS`.
 
