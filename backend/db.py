@@ -1,7 +1,9 @@
 import os
 import re
+import socket
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlparse
 
 import psycopg
 from psycopg.rows import dict_row
@@ -40,7 +42,52 @@ def _resolve_database_url():
     return ""
 
 
-DATABASE_URL = _resolve_database_url()
+def _ensure_sslmode(url):
+    """Append sslmode=require if not already present — required by Supabase."""
+    if not url:
+        return url
+    if "sslmode" in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}sslmode=require"
+
+
+def _resolve_host_to_ipv4(hostname):
+    """Resolve hostname to an IPv4 address.
+
+    Vercel Lambda does not support IPv6 outbound connections.
+    Supabase DNS may return an IPv6 (AAAA) record which causes
+    'Cannot assign requested address' errors on Vercel.
+    """
+    try:
+        results = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
+        if results:
+            return results[0][4][0]
+    except (socket.gaierror, OSError, IndexError):
+        pass
+    return None
+
+
+def _prepare_database_url(url):
+    """Prepare a DATABASE_URL for serverless deployment.
+
+    1. Ensure sslmode=require (Supabase requirement)
+    2. Add connect_timeout for cold starts
+    """
+    if not url:
+        return url
+
+    url = _ensure_sslmode(url)
+
+    # Add connect_timeout if missing
+    if "connect_timeout" not in url:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}connect_timeout=10"
+
+    return url
+
+
+DATABASE_URL = _prepare_database_url(_resolve_database_url())
 IS_POSTGRES = bool(DATABASE_URL)
 
 
@@ -151,9 +198,24 @@ def _resolve_db_path():
 DB_PATH = _resolve_db_path()
 
 
-def get_conn():
+def get_conn(*, autocommit=False):
     if IS_POSTGRES:
-        pg_conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        connect_kwargs = {
+            "conninfo": DATABASE_URL,
+            "row_factory": dict_row,
+            "autocommit": autocommit,
+        }
+        # Resolve hostname to IPv4 — Vercel Lambda does not support IPv6
+        try:
+            parsed = urlparse(DATABASE_URL)
+            hostname = parsed.hostname
+            if hostname:
+                ipv4 = _resolve_host_to_ipv4(hostname)
+                if ipv4:
+                    connect_kwargs["hostaddr"] = ipv4
+        except Exception:
+            pass
+        pg_conn = psycopg.connect(**connect_kwargs)
         return _PgConnAdapter(pg_conn)
 
     conn = sqlite3.connect(DB_PATH)
@@ -163,7 +225,15 @@ def get_conn():
 
 
 def init_db():
-    conn = get_conn()
+    try:
+        _init_db_inner()
+    except Exception as exc:
+        print(f"WARNING: Cannot initialize database: {exc}")
+        print("App will continue running but database may not be ready.")
+
+
+def _init_db_inner():
+    conn = get_conn(autocommit=IS_POSTGRES)
     cur = conn.cursor()
 
     schema_sql = """
@@ -409,7 +479,8 @@ def init_db():
         _run_migrations(conn)
 
     seed_data(conn)
-    conn.commit()
+    if not IS_POSTGRES:
+        conn.commit()
     conn.close()
 
 
