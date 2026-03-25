@@ -79,6 +79,7 @@ def create_app():
 
     stateful_sessions_on_vercel = IS_VERCEL and not is_postgres_backend()
     stateless_session_enabled = os.getenv("STATELESS_SESSION") == "1" or stateful_sessions_on_vercel
+    requires_stateless_for_ephemeral_db = stateful_sessions_on_vercel
     attendance_qr_enabled = True
 
     def _prune_login_attempts(now_ts):
@@ -158,11 +159,18 @@ def create_app():
         return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
     if stateless_session_enabled and _is_weak_secret(STATELESS_SESSION_SECRET, DEFAULT_STATELESS_SESSION_SECRET):
-        stateless_session_enabled = False
-        app.logger.warning(
-            "SESSION_TOKEN_SECRET is weak or missing; falling back to DB-backed sessions. "
-            "Set SESSION_TOKEN_SECRET (>=32 chars) and optionally STATELESS_SESSION=1 to re-enable stateless sessions."
-        )
+        if requires_stateless_for_ephemeral_db:
+            app.logger.warning(
+                "SESSION_TOKEN_SECRET is weak or missing on Vercel SQLite. "
+                "Continuing with stateless sessions to avoid random logouts across serverless instances. "
+                "Set SESSION_TOKEN_SECRET (>=32 chars) for production security."
+            )
+        else:
+            stateless_session_enabled = False
+            app.logger.warning(
+                "SESSION_TOKEN_SECRET is weak or missing; falling back to DB-backed sessions. "
+                "Set SESSION_TOKEN_SECRET (>=32 chars) and optionally STATELESS_SESSION=1 to re-enable stateless sessions."
+            )
     if IS_VERCEL and _is_weak_secret(ATTENDANCE_QR_SECRET, DEFAULT_ATTENDANCE_QR_SECRET):
         attendance_qr_enabled = False
         app.logger.warning(
@@ -3336,3 +3344,4 @@ def create_app():
 if __name__ == "__main__":
     debug_enabled = os.getenv("FLASK_DEBUG") == "1"
     create_app().run(host="0.0.0.0", port=5000, debug=debug_enabled)
+

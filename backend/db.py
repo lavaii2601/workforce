@@ -30,7 +30,6 @@ ID_TABLES = {
 def _resolve_database_url():
     candidates = [
         os.getenv("DATABASE_URL"),
-        os.getenv("SUPABASE_DATABASE_URL"),
         os.getenv("POSTGRES_URL"),
         os.getenv("POSTGRES_PRISMA_URL"),
         os.getenv("POSTGRES_URL_NON_POOLING"),
