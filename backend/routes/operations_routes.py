@@ -1,0 +1,1069 @@
+import re
+from datetime import datetime, timedelta
+
+from flask import jsonify, request
+from werkzeug.security import generate_password_hash
+
+
+def register_operations_routes(app, deps):
+    get_conn = deps["get_conn"]
+    get_user_from_token = deps["_get_user_from_token"]
+    normalize_day_of_week = deps["_normalize_day_of_week"]
+    get_branch_staffing_rules = deps["_get_branch_staffing_rules"]
+    week_start_and_day_for_datetime = deps["_week_start_and_day_for_datetime"]
+    shift_start_datetime = deps["_shift_start_datetime"]
+    format_db_datetime = deps["_format_db_datetime"]
+    upsert_shift_attendance_mark = deps["_upsert_shift_attendance_mark"]
+    weekly_hours_rows = deps["_weekly_hours_rows"]
+    csv_response = deps["_csv_response"]
+    manager_can_manage_employee = deps["_manager_can_manage_employee"]
+
+    shift_code_set = deps["SHIFT_CODE_SET"]
+    shift_definitions = deps["SHIFT_DEFINITIONS"]
+
+    @app.post("/api/issues")
+    def create_issue():
+        user, error = get_user_from_token(roles={"employee", "manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        title = (body.get("title") or "").strip()
+        details = (body.get("details") or "").strip()
+        branch_id = body.get("branch_id")
+        if not title or not details:
+            return jsonify({"error": "title and details are required"}), 400
+
+        conn = get_conn()
+        if user["role"] == "employee":
+            allowed = {
+                row["branch_id"]
+                for row in conn.execute(
+                    "SELECT branch_id FROM employee_branch_access WHERE employee_id = ?",
+                    (user["id"],),
+                ).fetchall()
+            }
+            if not allowed:
+                conn.close()
+                return jsonify({"error": "No branch assigned for this employee"}), 400
+            if branch_id is None:
+                branch_id = next(iter(allowed))
+            if branch_id not in allowed:
+                conn.close()
+                return jsonify({"error": "Invalid branch for issue report"}), 400
+        elif user["role"] == "manager":
+            branch_id = user["branch_id"]
+
+        conn.execute(
+            """
+            INSERT INTO issue_reports(reporter_id, reporter_role, branch_id, title, details)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user["id"], user["role"], branch_id, title, details),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Issue report submitted"}), 201
+
+    @app.get("/api/issues/my")
+    def my_issues():
+        user, error = get_user_from_token(roles={"employee", "manager"})
+        if error:
+            return error
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT i.id,
+                   i.title,
+                   i.details,
+                   i.branch_id,
+                   i.status,
+                   i.escalated_to_ceo,
+                   i.manager_note,
+                   i.created_at,
+                   i.updated_at,
+                   COALESCE(b.name, '-') AS branch_name
+            FROM issue_reports i
+            LEFT JOIN branches b ON b.id = i.branch_id
+            WHERE i.reporter_id = ?
+            ORDER BY i.id DESC
+            """,
+            (user["id"],),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
+    @app.get("/api/employee/branches")
+    def employee_branches():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT b.id, b.name
+            FROM employee_branch_access eba
+            JOIN branches b ON b.id = eba.branch_id
+            WHERE eba.employee_id = ?
+            ORDER BY b.name
+            """,
+            (user["id"],),
+        ).fetchall()
+        conn.close()
+
+        return jsonify([dict(row) for row in rows])
+
+    @app.put("/api/employee/preferences")
+    def upsert_preferences():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        week_start = (body.get("week_start") or "").strip()
+        selections = body.get("selections") or []
+
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+        if not isinstance(selections, list):
+            return jsonify({"error": "selections must be a list"}), 400
+
+        conn = get_conn()
+        allowed_branch_ids = {
+            row["branch_id"]
+            for row in conn.execute(
+                "SELECT branch_id FROM employee_branch_access WHERE employee_id = ?",
+                (user["id"],),
+            ).fetchall()
+        }
+
+        valid_rows = []
+        seen = set()
+        for item in selections:
+            branch_id = item.get("branch_id")
+            shift_code = item.get("shift_code")
+            day_of_week = normalize_day_of_week(item.get("day_of_week"))
+            if branch_id not in allowed_branch_ids:
+                conn.close()
+                return jsonify({"error": f"Branch {branch_id} not allowed"}), 400
+            if shift_code not in shift_code_set:
+                conn.close()
+                return jsonify({"error": f"Invalid shift code: {shift_code}"}), 400
+            if day_of_week is None:
+                conn.close()
+                return jsonify({"error": "day_of_week must be in range 1..7"}), 400
+            key = (branch_id, shift_code, day_of_week)
+            if key in seen:
+                continue
+            seen.add(key)
+            valid_rows.append((user["id"], week_start, branch_id, shift_code, day_of_week))
+
+        conn.execute(
+            "DELETE FROM shift_preferences WHERE employee_id = ? AND week_start = ?",
+            (user["id"], week_start),
+        )
+        if valid_rows:
+            conn.executemany(
+                """
+                INSERT INTO shift_preferences(employee_id, week_start, branch_id, shift_code, day_of_week)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                valid_rows,
+            )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Saved preferences", "count": len(valid_rows)})
+
+    @app.get("/api/employee/preferences")
+    def employee_preferences():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT sp.id, sp.week_start, sp.branch_id, b.name AS branch_name, sp.shift_code, sp.day_of_week
+            FROM shift_preferences sp
+            JOIN branches b ON b.id = sp.branch_id
+            WHERE sp.employee_id = ? AND sp.week_start = ?
+            ORDER BY sp.day_of_week, b.name, sp.shift_code
+            """,
+            (user["id"], week_start),
+        ).fetchall()
+        conn.close()
+
+        return jsonify([dict(row) for row in rows])
+
+    @app.get("/api/employee/assigned-schedule")
+    def employee_assigned_schedule():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT ws.id,
+                   ws.week_start,
+                   ws.shift_code,
+                   ws.day_of_week,
+                   ws.branch_id,
+                   b.name AS branch_name,
+                   m.display_name AS assigned_by_name
+            FROM weekly_schedule ws
+            JOIN branches b ON b.id = ws.branch_id
+            JOIN users m ON m.id = ws.assigned_by
+            WHERE ws.employee_id = ?
+              AND ws.week_start = ?
+            ORDER BY ws.day_of_week, ws.shift_code, b.name
+            """,
+            (user["id"], week_start),
+        ).fetchall()
+        conn.close()
+
+        return jsonify([dict(row) for row in rows])
+
+    @app.get("/api/manager/preferences")
+    def manager_view_preferences():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT sp.id,
+                   sp.employee_id,
+                   u.display_name AS employee_name,
+                   sp.week_start,
+                   sp.branch_id,
+                   b.name AS branch_name,
+                   sp.shift_code,
+                   sp.day_of_week
+            FROM shift_preferences sp
+            JOIN users u ON u.id = sp.employee_id
+            JOIN branches b ON b.id = sp.branch_id
+            WHERE sp.week_start = ?
+              AND sp.branch_id = ?
+            ORDER BY sp.day_of_week, sp.shift_code, u.display_name
+            """,
+            (week_start, user["branch_id"]),
+        ).fetchall()
+        conn.close()
+
+        return jsonify([dict(row) for row in rows])
+
+    @app.put("/api/manager/schedule")
+    def manager_save_schedule():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        week_start = (body.get("week_start") or "").strip()
+        assignments = body.get("assignments") or []
+
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+        if not isinstance(assignments, list):
+            return jsonify({"error": "assignments must be a list"}), 400
+
+        conn = get_conn()
+        staffing_rules = get_branch_staffing_rules(conn, user["branch_id"])
+        normalized = []
+        seen = set()
+        for item in assignments:
+            employee_id = item.get("employee_id")
+            shift_code = item.get("shift_code")
+            day_of_week = normalize_day_of_week(item.get("day_of_week"))
+            if shift_code not in shift_code_set:
+                conn.close()
+                return jsonify({"error": f"Invalid shift code: {shift_code}"}), 400
+            if day_of_week is None:
+                conn.close()
+                return jsonify({"error": "day_of_week must be in range 1..7"}), 400
+
+            pref_exists = conn.execute(
+                """
+                SELECT 1
+                FROM shift_preferences
+                WHERE employee_id = ?
+                  AND week_start = ?
+                  AND branch_id = ?
+                  AND shift_code = ?
+                  AND (day_of_week = ? OR day_of_week = 0)
+                """,
+                (employee_id, week_start, user["branch_id"], shift_code, day_of_week),
+            ).fetchone()
+            if not pref_exists:
+                conn.close()
+                return jsonify(
+                    {
+                        "error": "Only selected shifts can be assigned",
+                        "employee_id": employee_id,
+                        "shift_code": shift_code,
+                        "day_of_week": day_of_week,
+                    }
+                ), 400
+
+            key = (employee_id, shift_code, day_of_week)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append((week_start, user["branch_id"], employee_id, shift_code, day_of_week, user["id"]))
+
+        counts = {}
+        for _, _, _, shift_code, day_of_week, _ in normalized:
+            key = (shift_code, day_of_week)
+            counts[key] = counts.get(key, 0) + 1
+
+        violations = []
+        for (shift_code, day_of_week), count in counts.items():
+            rule = staffing_rules.get(shift_code, {"min_staff": 3, "max_staff": 4})
+            min_staff = int(rule["min_staff"])
+            max_staff = int(rule["max_staff"])
+            if count < min_staff or count > max_staff:
+                violations.append(
+                    {
+                        "shift_code": shift_code,
+                        "day_of_week": day_of_week,
+                        "count": count,
+                        "min_staff": min_staff,
+                        "max_staff": max_staff,
+                    }
+                )
+
+        if violations:
+            conn.close()
+            first = violations[0]
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            f"Staffing out of range at {first['shift_code']} (day {first['day_of_week']}): "
+                            f"{first['count']} assigned, required {first['min_staff']}-{first['max_staff']}"
+                        ),
+                        "violations": violations,
+                    }
+                ),
+                400,
+            )
+
+        conn.execute(
+            "DELETE FROM weekly_schedule WHERE week_start = ? AND branch_id = ?",
+            (week_start, user["branch_id"]),
+        )
+        if normalized:
+            conn.executemany(
+                """
+                INSERT INTO weekly_schedule(
+                    week_start,
+                    branch_id,
+                    employee_id,
+                    shift_code,
+                    day_of_week,
+                    assigned_by
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                normalized,
+            )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Weekly schedule saved", "count": len(normalized)})
+
+    @app.get("/api/manager/staffing-rules")
+    def manager_staffing_rules_get():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        conn = get_conn()
+        rules = get_branch_staffing_rules(conn, user["branch_id"])
+        conn.close()
+
+        payload = []
+        for shift in shift_definitions:
+            rule = rules.get(shift["code"], {"min_staff": 3, "max_staff": 4})
+            payload.append(
+                {
+                    "shift_code": shift["code"],
+                    "shift_name": shift["name"],
+                    "min_staff": int(rule["min_staff"]),
+                    "max_staff": int(rule["max_staff"]),
+                }
+            )
+        return jsonify(payload)
+
+    @app.put("/api/manager/staffing-rules")
+    def manager_staffing_rules_put():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        rules = body.get("rules") or []
+        if not isinstance(rules, list) or not rules:
+            return jsonify({"error": "rules must be a non-empty list"}), 400
+
+        normalized = []
+        seen = set()
+        for item in rules:
+            shift_code = item.get("shift_code")
+            if shift_code not in shift_code_set:
+                return jsonify({"error": f"Invalid shift code: {shift_code}"}), 400
+            if shift_code in seen:
+                continue
+            seen.add(shift_code)
+
+            try:
+                min_staff = int(item.get("min_staff"))
+                max_staff = int(item.get("max_staff"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "min_staff/max_staff must be integers"}), 400
+
+            if min_staff < 0 or max_staff < 1 or min_staff > max_staff:
+                return jsonify({"error": f"Invalid range for {shift_code}. Ensure 0 <= min <= max and max >= 1"}), 400
+
+            normalized.append((user["branch_id"], shift_code, min_staff, max_staff))
+
+        conn = get_conn()
+        conn.executemany(
+            """
+            INSERT INTO branch_shift_requirements(branch_id, shift_code, min_staff, max_staff)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(branch_id, shift_code)
+            DO UPDATE SET min_staff = excluded.min_staff, max_staff = excluded.max_staff
+            """,
+            normalized,
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({"message": "Staffing rules updated", "count": len(normalized)})
+
+    @app.get("/api/manager/schedule")
+    def manager_get_schedule():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT ws.id,
+                   ws.employee_id,
+                   u.display_name AS employee_name,
+                   ws.shift_code,
+                   ws.day_of_week,
+                   ws.week_start,
+                   ws.branch_id,
+                   b.name AS branch_name
+            FROM weekly_schedule ws
+            JOIN users u ON u.id = ws.employee_id
+            JOIN branches b ON b.id = ws.branch_id
+            WHERE ws.week_start = ?
+              AND ws.branch_id = ?
+            ORDER BY ws.day_of_week, ws.shift_code, u.display_name
+            """,
+            (week_start, user["branch_id"]),
+        ).fetchall()
+        conn.close()
+
+        return jsonify([dict(row) for row in rows])
+
+    @app.get("/api/manager/attendance-shifts/today")
+    def manager_attendance_shifts_today():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        current_dt = datetime.now()
+        week_start, day_of_week = week_start_and_day_for_datetime(current_dt)
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT ws.id AS schedule_id,
+                   ws.week_start,
+                   ws.day_of_week,
+                   ws.shift_code,
+                   ws.branch_id,
+                   ws.employee_id,
+                   u.display_name AS employee_name,
+                   m.status,
+                   m.source,
+                   m.note,
+                   m.updated_at,
+                   m.marked_by_manager_id,
+                   m.attendance_log_id
+            FROM weekly_schedule ws
+            JOIN users u ON u.id = ws.employee_id
+            LEFT JOIN shift_attendance_marks m
+                   ON m.week_start = ws.week_start
+                  AND m.day_of_week = ws.day_of_week
+                  AND m.shift_code = ws.shift_code
+                  AND m.branch_id = ws.branch_id
+                  AND m.employee_id = ws.employee_id
+            WHERE ws.branch_id = ?
+              AND ws.week_start = ?
+              AND ws.day_of_week = ?
+            ORDER BY ws.shift_code, u.display_name
+            """,
+            (user["branch_id"], week_start, day_of_week),
+        ).fetchall()
+        conn.close()
+
+        items = []
+        for row in rows:
+            start_dt = shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
+            if not start_dt:
+                continue
+            late_deadline_dt = start_dt + timedelta(minutes=15)
+            status = row["status"]
+            if not status:
+                status = "late_unmarked" if current_dt > late_deadline_dt else "pending"
+
+            items.append(
+                {
+                    "schedule_id": row["schedule_id"],
+                    "week_start": row["week_start"],
+                    "day_of_week": row["day_of_week"],
+                    "shift_code": row["shift_code"],
+                    "employee_id": row["employee_id"],
+                    "employee_name": row["employee_name"],
+                    "status": status,
+                    "source": row["source"] or "",
+                    "note": row["note"] or "",
+                    "attendance_log_id": row["attendance_log_id"],
+                    "shift_start_at": format_db_datetime(start_dt),
+                    "late_deadline_at": format_db_datetime(late_deadline_dt),
+                    "updated_at": row["updated_at"],
+                }
+            )
+
+        return jsonify(
+            {
+                "server_now": format_db_datetime(current_dt),
+                "week_start": week_start,
+                "day_of_week": day_of_week,
+                "items": items,
+            }
+        )
+
+    @app.put("/api/manager/attendance-shifts/override")
+    def manager_attendance_shift_override():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        schedule_id = body.get("schedule_id")
+        note = (body.get("note") or "").strip() or "Quản lý xác nhận đi làm đúng giờ (quên chấm công)"
+
+        try:
+            schedule_id = int(schedule_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "schedule_id is required and must be integer"}), 400
+
+        conn = get_conn()
+        schedule = conn.execute(
+            """
+            SELECT id, week_start, day_of_week, shift_code, branch_id, employee_id
+            FROM weekly_schedule
+            WHERE id = ?
+              AND branch_id = ?
+            LIMIT 1
+            """,
+            (schedule_id, user["branch_id"]),
+        ).fetchone()
+        if not schedule:
+            conn.close()
+            return jsonify({"error": "Schedule not found in your branch"}), 404
+
+        upsert_shift_attendance_mark(
+            conn,
+            week_start=schedule["week_start"],
+            day_of_week=schedule["day_of_week"],
+            shift_code=schedule["shift_code"],
+            branch_id=schedule["branch_id"],
+            employee_id=schedule["employee_id"],
+            status="present_override",
+            source="manager_override",
+            note=note,
+            marked_by_manager_id=user["id"],
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({"message": "Đã cập nhật trạng thái: đã đi làm"})
+
+    @app.get("/api/manager/self-preferences")
+    def manager_self_preferences_get():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT id, shift_code, day_of_week
+            FROM shift_preferences
+            WHERE employee_id = ?
+              AND branch_id = ?
+              AND week_start = ?
+            ORDER BY day_of_week, shift_code
+            """,
+            (user["id"], user["branch_id"], week_start),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
+    @app.put("/api/manager/self-preferences")
+    def manager_self_preferences_put():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        week_start = (body.get("week_start") or "").strip()
+        shifts = body.get("shift_codes") or []
+        selections = body.get("selections") or []
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+        if not isinstance(shifts, list):
+            return jsonify({"error": "shift_codes must be a list"}), 400
+        if not isinstance(selections, list):
+            return jsonify({"error": "selections must be a list"}), 400
+
+        normalized = []
+        seen = set()
+        for item in selections:
+            shift_code = item.get("shift_code")
+            day_of_week = normalize_day_of_week(item.get("day_of_week"))
+            if shift_code not in shift_code_set:
+                return jsonify({"error": f"Invalid shift code: {shift_code}"}), 400
+            if day_of_week is None:
+                return jsonify({"error": "day_of_week must be in range 1..7"}), 400
+            key = (shift_code, day_of_week)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append((shift_code, day_of_week))
+
+        if not normalized:
+            for shift_code in shifts:
+                if shift_code not in shift_code_set:
+                    return jsonify({"error": f"Invalid shift code: {shift_code}"}), 400
+                for day_of_week in range(1, 8):
+                    key = (shift_code, day_of_week)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    normalized.append((shift_code, day_of_week))
+
+        conn = get_conn()
+        conn.execute(
+            "DELETE FROM shift_preferences WHERE employee_id = ? AND branch_id = ? AND week_start = ?",
+            (user["id"], user["branch_id"], week_start),
+        )
+        if normalized:
+            conn.executemany(
+                """
+                INSERT INTO shift_preferences(employee_id, week_start, branch_id, shift_code, day_of_week)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (user["id"], week_start, user["branch_id"], shift_code, day_of_week)
+                    for shift_code, day_of_week in normalized
+                ],
+            )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Saved manager shift preferences", "count": len(normalized)})
+
+    @app.get("/api/manager/issues")
+    def manager_issues():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT i.id,
+                   i.title,
+                   i.details,
+                   i.status,
+                   i.escalated_to_ceo,
+                   i.manager_note,
+                   i.created_at,
+                   i.updated_at,
+                   u.display_name AS reporter_name,
+                   u.role AS reporter_role,
+                   COALESCE(b.name, '-') AS branch_name
+            FROM issue_reports i
+            JOIN users u ON u.id = i.reporter_id
+            LEFT JOIN branches b ON b.id = i.branch_id
+            WHERE i.branch_id = ?
+            ORDER BY i.id DESC
+            """,
+            (user["branch_id"],),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
+    @app.put("/api/manager/issues/<int:issue_id>")
+    def manager_issue_update(issue_id):
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        status = body.get("status")
+        manager_note = (body.get("manager_note") or "").strip() or None
+        escalate = 1 if body.get("escalate_to_ceo", False) else 0
+        allowed = {"open", "in_review", "escalated", "resolved"}
+        if status not in allowed:
+            return jsonify({"error": "Invalid status"}), 400
+
+        conn = get_conn()
+        issue = conn.execute(
+            "SELECT id, branch_id FROM issue_reports WHERE id = ?",
+            (issue_id,),
+        ).fetchone()
+        if not issue:
+            conn.close()
+            return jsonify({"error": "Issue not found"}), 404
+        if issue["branch_id"] != user["branch_id"]:
+            conn.close()
+            return jsonify({"error": "Forbidden for this branch"}), 403
+
+        final_status = "escalated" if escalate else status
+        conn.execute(
+            """
+            UPDATE issue_reports
+            SET status = ?,
+                escalated_to_ceo = ?,
+                manager_note = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (final_status, escalate, manager_note, issue_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Issue updated"})
+
+    @app.get("/api/manager/payroll-export.csv")
+    def manager_payroll_export():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = weekly_hours_rows(conn, week_start, branch_id=user["branch_id"])
+        conn.close()
+        csv_rows = [
+            [
+                item["employee_id"],
+                item["username"],
+                item["employee_name"],
+                item["role"],
+                item["branch_name"],
+                round(item["total_minutes"] / 60, 2),
+                item["attendance_sessions"],
+                week_start,
+            ]
+            for item in rows
+        ]
+        return csv_response(
+            filename=f"payroll_branch_{user['branch_id']}_{week_start}.csv",
+            headers=[
+                "employee_id",
+                "username",
+                "employee_name",
+                "role",
+                "branch_name",
+                "hours_worked",
+                "attendance_sessions",
+                "week_start",
+            ],
+            rows=csv_rows,
+        )
+
+    @app.get("/api/manager/employees")
+    def manager_list_employees():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        keyword = (request.args.get("q") or "").strip()
+
+        conn = get_conn()
+        sql = """
+            SELECT u.id,
+                   u.username,
+                   u.display_name,
+                   u.full_name,
+                   u.avatar_data_url,
+                   u.phone_number,
+                   u.address,
+                   u.date_of_birth,
+                   u.job_position,
+                   u.is_active,
+                   GROUP_CONCAT(b.name, ', ') AS branch_names,
+                   GROUP_CONCAT(eba.branch_id, ',') AS branch_ids
+            FROM users u
+            JOIN employee_branch_access eba ON eba.employee_id = u.id
+            JOIN branches b ON b.id = eba.branch_id
+            WHERE u.role = 'employee'
+              AND u.id IN (
+                  SELECT employee_id FROM employee_branch_access WHERE branch_id = ?
+              )
+        """
+        params = [user["branch_id"]]
+        if keyword:
+            sql += """
+              AND (
+                          u.username LIKE ? COLLATE NOCASE
+                      OR u.display_name LIKE ? COLLATE NOCASE
+                      OR COALESCE(u.full_name, '') LIKE ? COLLATE NOCASE
+                      OR COALESCE(u.phone_number, '') LIKE ? COLLATE NOCASE
+              )
+            """
+            like_kw = f"%{keyword}%"
+            params.extend([like_kw, like_kw, like_kw, like_kw])
+
+        sql += """
+            GROUP BY u.id,
+                     u.username,
+                     u.display_name,
+                     u.full_name,
+                     u.avatar_data_url,
+                     u.phone_number,
+                     u.address,
+                     u.date_of_birth,
+                     u.job_position,
+                     u.is_active
+            ORDER BY u.display_name
+        """
+        rows = conn.execute(sql, tuple(params)).fetchall()
+
+        branch_rows = conn.execute(
+            """
+            SELECT b.id, b.name
+            FROM branches b
+            WHERE b.id = ?
+            ORDER BY b.name
+            """,
+            (user["branch_id"],),
+        ).fetchall()
+
+        conn.close()
+
+        employees = []
+        for row in rows:
+            item = dict(row)
+            item["branch_names"] = [name.strip() for name in (item.get("branch_names") or "").split(",") if name.strip()]
+            item["branch_ids"] = [
+                int(branch_id)
+                for branch_id in (item.get("branch_ids") or "").split(",")
+                if branch_id.strip().isdigit()
+            ]
+            item["contact_ready"] = bool((item.get("phone_number") or "").strip())
+            employees.append(item)
+
+        return jsonify(
+            {
+                "employees": employees,
+                "branches": [dict(row) for row in branch_rows],
+                "default_branch_ids": [user["branch_id"]],
+            }
+        )
+
+    @app.post("/api/manager/employees")
+    def manager_create_employee():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        username = (body.get("username") or "").strip()
+        display_name = (body.get("display_name") or "").strip()
+        password = body.get("password") or ""
+        branch_ids = body.get("branch_ids") or [user["branch_id"]]
+
+        if not username or not display_name:
+            return jsonify({"error": "username and display_name are required"}), 400
+        if len(password) < 6:
+            return jsonify({"error": "password must be at least 6 characters"}), 400
+        if not isinstance(branch_ids, list) or not branch_ids:
+            return jsonify({"error": "branch_ids must be a non-empty list"}), 400
+
+        try:
+            normalized_branch_ids = sorted({int(branch_id) for branch_id in branch_ids})
+        except (TypeError, ValueError):
+            return jsonify({"error": "branch_ids must contain valid integer ids"}), 400
+        if normalized_branch_ids != [user["branch_id"]]:
+            return jsonify({"error": "Manager can only create employee in own branch scope"}), 403
+
+        conn = get_conn()
+        existing = conn.execute(
+            "SELECT 1 FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if existing:
+            conn.close()
+            return jsonify({"error": "username already exists"}), 409
+
+        valid_branch_count = conn.execute(
+            f"SELECT COUNT(*) AS c FROM branches WHERE id IN ({','.join(['?'] * len(normalized_branch_ids))})",
+            tuple(normalized_branch_ids),
+        ).fetchone()["c"]
+        if valid_branch_count != len(normalized_branch_ids):
+            conn.close()
+            return jsonify({"error": "Some branch_ids are invalid"}), 400
+
+        cur = conn.execute(
+            """
+            INSERT INTO users(username, display_name, role, branch_id, password_hash, is_active)
+            VALUES (?, ?, 'employee', NULL, ?, 1)
+            """,
+            (username, display_name, generate_password_hash(password)),
+        )
+        employee_id = cur.lastrowid
+
+        conn.executemany(
+            "INSERT INTO employee_branch_access(employee_id, branch_id) VALUES (?, ?)",
+            [(employee_id, branch_id) for branch_id in normalized_branch_ids],
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Employee account created", "employee_id": employee_id}), 201
+
+    @app.put("/api/manager/employees/<int:employee_id>")
+    def manager_update_employee(employee_id):
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        display_name = (body.get("display_name") or "").strip()
+        full_name = (body.get("full_name") or "").strip()
+        phone_number = (body.get("phone_number") or "").strip()
+        address = (body.get("address") or "").strip()
+        date_of_birth = (body.get("date_of_birth") or "").strip()
+        job_position = (body.get("job_position") or "").strip()
+
+        if not display_name:
+            return jsonify({"error": "Tên hiển thị không được để trống"}), 400
+        if not full_name:
+            return jsonify({"error": "Họ tên không được để trống"}), 400
+        if len(display_name) > 80:
+            return jsonify({"error": "Tên hiển thị quá dài"}), 400
+        if len(full_name) > 120:
+            return jsonify({"error": "Họ tên quá dài"}), 400
+        if phone_number and not re.fullmatch(r"\+?[0-9]{9,15}", phone_number):
+            return jsonify({"error": "Số điện thoại không hợp lệ"}), 400
+        if date_of_birth:
+            try:
+                datetime.strptime(date_of_birth, "%Y-%m-%d")
+            except ValueError:
+                return jsonify({"error": "Ngày sinh không đúng định dạng YYYY-MM-DD"}), 400
+        if len(address) > 255:
+            return jsonify({"error": "Địa chỉ quá dài"}), 400
+        if len(job_position) > 120:
+            return jsonify({"error": "Vị trí công việc quá dài"}), 400
+
+        conn = get_conn()
+        target = conn.execute(
+            "SELECT id, role FROM users WHERE id = ?",
+            (employee_id,),
+        ).fetchone()
+        if not target:
+            conn.close()
+            return jsonify({"error": "User not found"}), 404
+        if target["role"] != "employee":
+            conn.close()
+            return jsonify({"error": "Manager can only edit employee accounts"}), 400
+        if not manager_can_manage_employee(conn, user["branch_id"], employee_id):
+            conn.close()
+            return jsonify({"error": "You can only edit employees in your branch scope"}), 403
+
+        conn.execute(
+            """
+            UPDATE users
+            SET display_name = ?,
+                full_name = ?,
+                phone_number = ?,
+                address = ?,
+                date_of_birth = ?,
+                job_position = ?
+            WHERE id = ?
+            """,
+            (
+                display_name,
+                full_name,
+                phone_number or None,
+                address or None,
+                date_of_birth or None,
+                job_position or None,
+                employee_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Employee profile updated"})
+
+    @app.delete("/api/manager/employees/<int:employee_id>")
+    def manager_delete_employee(employee_id):
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        conn = get_conn()
+        target = conn.execute(
+            "SELECT id, role, display_name FROM users WHERE id = ?",
+            (employee_id,),
+        ).fetchone()
+        if not target:
+            conn.close()
+            return jsonify({"error": "User not found"}), 404
+        if target["role"] != "employee":
+            conn.close()
+            return jsonify({"error": "Manager can only delete employee accounts"}), 400
+        if not manager_can_manage_employee(conn, user["branch_id"], employee_id):
+            conn.close()
+            return jsonify({"error": "You can only delete employees in your branch scope"}), 403
+
+        conn.execute("DELETE FROM users WHERE id = ?", (employee_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Employee account deleted"})
