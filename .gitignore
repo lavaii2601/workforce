@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+.vscode/
+.DS_Store
+Thumbs.db
+.vercel/
+workforce-feature-vercel-deploy/
+UNIFOOD BANG LUONG FINAL-T01.2026.xlsx
