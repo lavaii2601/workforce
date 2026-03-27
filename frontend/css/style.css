@@ -16,6 +16,16 @@
   --space-3: 16px;
 }
 
+/* Compact Mode */
+body.compact-mode {
+  --control-h: 34px;
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -785,14 +795,228 @@ body.no-scroll {
   font-weight: 500;
 }
 
+.tt-checkbox small {
+  font-size: 0.78rem;
+  color: rgba(21, 33, 29, 0.72);
+}
+
 .tt-pill {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   border-radius: 999px;
   padding: 5px 10px;
   border: 1px solid rgba(14, 125, 87, 0.26);
   background: rgba(14, 125, 87, 0.08);
   font-size: 0.95rem;
+}
+
+.tt-pill small {
+  font-size: 0.74rem;
+  color: rgba(21, 33, 29, 0.72);
+}
+
+.compact-shift-pill {
+  padding: 3px 8px;
+  font-size: 0.86rem;
+}
+
+.compact-shift-pill.is-main {
+  border-color: rgba(31, 88, 154, 0.36);
+  background: rgba(31, 88, 154, 0.1);
+}
+
+.compact-shift-pill.is-flex {
+  border-color: rgba(148, 92, 17, 0.38);
+  background: rgba(225, 161, 52, 0.14);
+}
+
+.worker-name-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(14, 125, 87, 0.18);
+  border: 1px solid rgba(14, 125, 87, 0.36);
+  color: #0f4a36;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  flex: 0 0 auto;
+}
+
+.worker-shift-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.worker-shift-meta {
+  display: inline-grid;
+  line-height: 1.15;
+}
+
+.worker-name-text {
+  font-weight: 700;
+}
+
+.worker-pref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.grouped-shift-pill {
+  max-width: 100%;
+  border-width: 2px;
+  background: rgba(14, 125, 87, 0.12);
+}
+
+.grouped-shift-pill .worker-shift-meta {
+  max-width: 220px;
+}
+
+.grouped-shift-pill .worker-name-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+.flex-registered-time {
+  font-weight: 700;
+  color: #8e560f;
+}
+
+#manager-self-shifts-list .tt-checkbox .manager-self-flex-text {
+  margin-left: 4px;
+  font-weight: 700;
+  color: #8e560f;
+}
+
+.registration-group-item {
+  align-items: center;
+}
+
+.registration-group-item strong {
+  color: #0d4f38;
+}
+
+.registration-group-item.is-full {
+  border-color: rgba(186, 47, 53, 0.45);
+  background: rgba(186, 47, 53, 0.08);
+}
+
+.registration-group-item.is-full strong {
+  color: #8f2327;
+}
+
+.flex-editor-row {
+  align-items: center;
+}
+
+#employee-flex-editor-wrap,
+#manager-self-flex-editor-wrap {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(760px, calc(100vw - 36px));
+  max-height: min(74vh, 640px);
+  overflow: auto;
+  z-index: 42;
+  border: 1px solid rgba(14, 125, 87, 0.32);
+  background: linear-gradient(160deg, rgba(220, 246, 232, 0.98), rgba(194, 237, 214, 0.98));
+  box-shadow: 0 18px 34px rgba(12, 38, 29, 0.2);
+  animation: flexNoticeIn 0.2s ease-out;
+}
+
+.flex-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 41;
+  background: rgba(9, 30, 22, 0.28);
+  backdrop-filter: blur(2px);
+}
+
+.flex-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.flex-editor-head h4 {
+  margin: 0;
+}
+
+#btn-open-flex-editor,
+#btn-open-manager-self-flex-editor {
+  border-color: rgba(14, 125, 87, 0.38);
+}
+
+#btn-save-flex-hours-draft,
+#btn-save-manager-flex-hours-draft {
+  background: linear-gradient(120deg, #10895f, #0e7d57);
+  color: #ffffff;
+  border-color: rgba(11, 86, 60, 0.55);
+}
+
+#btn-save-flex-hours-draft:hover,
+#btn-save-manager-flex-hours-draft:hover {
+  filter: brightness(1.04);
+}
+
+.summary-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.summary-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(14, 125, 87, 0.26);
+  background: rgba(14, 125, 87, 0.08);
+  font-size: 0.9rem;
+}
+
+.summary-pill.warn {
+  border-color: rgba(186, 47, 53, 0.35);
+  background: rgba(186, 47, 53, 0.09);
+  color: #842529;
+}
+
+.flex-editor-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.92rem;
+}
+
+.flex-editor-controls input[type="time"] {
+  min-width: 118px;
+  height: 34px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+@keyframes flexNoticeIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 12px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
 }
 
 .staffing-rule-row {
@@ -809,6 +1033,16 @@ body.no-scroll {
 
 #manager-staffing-rules label {
   font-size: 0.9rem;
+}
+
+#manager-schedule-day-filter,
+#manager-assigned-day-filter {
+  min-width: 180px;
+}
+
+#manager-schedule .tt-pill,
+#manager-preferences .tt-checkbox {
+  max-width: 100%;
 }
 
 .staffing-count {
@@ -1092,6 +1326,22 @@ button.danger {
 .shift-status-badge.is-pending {
   color: #2f3a34;
   background: rgba(87, 102, 95, 0.12);
+}
+
+.late-shortage-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1;
+  color: #ffffff;
+  background: #b56a15;
+  border: 1px solid rgba(98, 53, 8, 0.42);
 }
 
 #route-manager-employees,
@@ -1405,6 +1655,87 @@ button.danger {
   display: none !important;
 }
 
+/* ===== DESKTOP WEB OPTIMIZATION ===== */
+@media (min-width: 1200px) {
+  .shell {
+    padding: 12px 14px 20px;
+  }
+
+  .content {
+    width: min(1660px, calc(100vw - 28px));
+  }
+
+  .app-view.desktop-docked .sidebar {
+    width: 300px;
+    border-radius: 0 16px 16px 0;
+  }
+
+  .app-view.desktop-docked .sidebar-overlay {
+    display: none !important;
+  }
+
+  .app-view.desktop-docked .sidebar-toggle {
+    left: 252px;
+    top: 14px;
+  }
+
+  .app-view.desktop-docked:not(.sidebar-collapsed) .content {
+    width: calc(100vw - 332px);
+    max-width: none;
+    margin-left: 318px;
+    margin-right: 14px;
+    padding-top: 58px;
+  }
+
+  .app-view.desktop-docked:not(.sidebar-collapsed) .content-head {
+    top: 10px;
+  }
+
+  .panel {
+    padding: 14px;
+  }
+
+  .row {
+    gap: 8px;
+  }
+
+  .field-grid {
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+  }
+
+  .list {
+    gap: 8px;
+  }
+
+  .list-item {
+    padding: 9px 11px;
+    gap: 10px;
+  }
+
+  .week-table th,
+  .week-table td {
+    padding: 8px;
+  }
+
+  #route-manager-attendance {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  #route-manager-attendance > h3,
+  #route-manager-attendance > .row:first-of-type,
+  #route-manager-attendance > #manager-attendance-list {
+    grid-column: 1 / -1;
+  }
+
+  #route-manager-export .row.compact,
+  #route-ceo-export .row.compact {
+    align-items: flex-end;
+  }
+}
+
 @media (max-width: 920px) {
   .shell {
     padding: 14px 12px 16px;
@@ -1455,6 +1786,12 @@ button.danger {
 
   .panel {
     padding: 14px;
+  }
+
+  #employee-flex-editor-wrap,
+  #manager-self-flex-editor-wrap {
+    width: calc(100vw - 24px);
+    max-height: 76vh;
   }
 
   .columns {
@@ -1541,5 +1878,531 @@ button.danger {
     width: 70px;
     height: 70px;
     border-radius: 14px;
+  }
+}
+
+/* ===== COMPACT MODE STYLES ===== */
+#btn-compact-mode {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 50;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: #fff;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 0.65rem;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(14, 125, 87, 0.25);
+  transition: all 0.3s ease;
+}
+
+#btn-compact-mode:hover {
+  background: var(--accent);
+  color: #fff;
+  transform: scale(1.1);
+}
+
+/* === Compact Mode - Body & Sizing === */
+body.compact-mode {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+body.compact-mode .shell {
+  padding: 8px 8px 10px;
+}
+
+body.compact-mode .sidebar {
+  gap: 6px;
+  padding: 10px 10px;
+  width: min(280px, 80vw);
+}
+
+body.compact-mode .sidebar-toggle {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  left: calc(min(280px, 80vw) - 50px);
+}
+
+/* === Compact Mode - Content & Padding === */
+body.compact-mode .content {
+  gap: 8px;
+  padding-top: 50px;
+}
+
+body.compact-mode .content-head {
+  padding: 8px 10px;
+  gap: 6px;
+}
+
+body.compact-mode .content-head h2 {
+  font-size: 1.1rem;
+}
+
+body.compact-mode .panel {
+  padding: 10px;
+  gap: 6px;
+}
+
+body.compact-mode .panel h3 {
+  margin-bottom: 5px;
+  font-size: 0.95rem;
+}
+
+body.compact-mode .panel h4 {
+  margin-bottom: 4px;
+  font-size: 0.9rem;
+}
+
+body.compact-mode .row {
+  gap: 6px;
+}
+
+body.compact-mode .row.compact {
+  gap: 4px;
+}
+
+body.compact-mode .list {
+  gap: 6px;
+  margin-top: 6px;
+}
+
+body.compact-mode .list-item {
+  padding: 6px 8px;
+  gap: 8px;
+  border-radius: 8px;
+}
+
+/* === Compact Mode - Input & Controls === */
+body.compact-mode input,
+body.compact-mode select,
+body.compact-mode textarea,
+body.compact-mode button {
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  min-height: 32px;
+}
+
+body.compact-mode button {
+  min-height: 32px;
+  padding: 5px 10px;
+  font-size: 0.85rem;
+}
+
+body.compact-mode label {
+  gap: 3px;
+  font-size: 0.85rem;
+}
+
+body.compact-mode input::placeholder,
+body.compact-mode textarea::placeholder {
+  font-size: 0.85rem;
+}
+
+body.compact-mode .field-grid {
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+/* === Compact Mode - Tables & Lists === */
+body.compact-mode .week-table th,
+body.compact-mode .week-table td {
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+
+body.compact-mode .compact-week-table th,
+body.compact-mode .compact-week-table td {
+  padding: 4px 6px;
+  font-size: 0.8rem;
+}
+
+body.compact-mode .timetable-head,
+body.compact-mode .timetable-row {
+  grid-template-columns: 160px 1fr;
+}
+
+body.compact-mode .tt-cell {
+  padding: 6px 8px;
+}
+
+body.compact-mode .tt-pill,
+body.compact-mode .tt-checkbox {
+  padding: 2px 6px;
+  font-size: 0.8rem;
+}
+
+body.compact-mode .tt-pill small,
+body.compact-mode .tt-checkbox small {
+  font-size: 0.7rem;
+}
+
+body.compact-mode .schedule-col {
+  padding: 8px;
+}
+
+body.compact-mode .schedule-col.compact {
+  padding: 6px;
+}
+
+/* === Compact Mode - Hide Descriptions === */
+body.compact-mode .muted {
+  display: none;
+}
+
+body.compact-mode .login-points {
+  display: none;
+}
+
+body.compact-mode .login-hero p.muted {
+  display: none;
+}
+
+body.compact-mode .schedule-color-legend {
+  display: none !important;
+}
+
+/* === Compact Mode - Forms & UI === */
+body.compact-mode .user-card {
+  gap: 6px;
+  padding: 6px;
+}
+
+body.compact-mode .avatar-box {
+  width: 36px;
+  height: 36px;
+  font-size: 0.75rem;
+}
+
+body.compact-mode .nav-link {
+  gap: 6px;
+  padding: 6px 8px;
+  min-height: 38px;
+  font-size: 0.85rem;
+}
+
+body.compact-mode .nav-link-title {
+  font-size: 0.9rem;
+}
+
+body.compact-mode .nav-link-dot {
+  width: 6px;
+  height: 6px;
+}
+
+body.compact-mode .badge {
+  padding: 4px 7px;
+  font-size: 0.65rem;
+}
+
+body.compact-mode .summary-pill {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  gap: 4px;
+}
+
+body.compact-mode .tt-checkbox {
+  gap: 4px;
+}
+
+body.compact-mode .registration-group-item,
+body.compact-mode .shift-attendance-item {
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+
+/* === Compact Mode - Header & Sidebar === */
+body.compact-mode .sidebar h2 {
+  margin: 4px 0 0;
+  font-size: 0.95rem;
+}
+
+body.compact-mode .sidebar-actions {
+  gap: 4px;
+}
+
+body.compact-mode #btn-open-profile,
+body.compact-mode #btn-logout {
+  font-size: 0.85rem;
+  padding: 5px 10px;
+}
+
+body.compact-mode .login-form-wrap {
+  padding: 10px;
+  gap: 8px;
+}
+
+body.compact-mode .login-card {
+  padding: 12px;
+}
+
+/* === Compact Mode - Schedule & Grid === */
+body.compact-mode .schedule-tabs {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+body.compact-mode .schedule-tab {
+  padding: 5px 10px;
+  font-size: 0.85rem;
+  min-height: 32px;
+}
+
+body.compact-mode #manager-new-branches,
+body.compact-mode #ceo-new-user-branch-multi {
+  min-height: 80px;
+}
+
+body.compact-mode .columns {
+  gap: 6px;
+}
+
+body.compact-mode .schedule-grid {
+  gap: 6px;
+}
+
+/* === Compact Mode - Chat & Special Panels === */
+body.compact-mode .chat-log {
+  min-height: 240px;
+  padding: 8px;
+}
+
+body.compact-mode .chat-message {
+  padding: 6px 8px;
+  font-size: 0.85rem;
+  max-width: min(85%, 800px);
+}
+
+body.compact-mode .chat-compose-row {
+  padding: 4px;
+  gap: 4px;
+}
+
+body.compact-mode .chat-compose-row input {
+  padding: 6px 8px;
+  font-size: 0.85rem;
+}
+
+body.compact-mode .quick-prompts {
+  gap: 6px;
+}
+
+body.compact-mode .quick-prompts button {
+  padding: 4px 8px;
+  font-size: 0.75rem;
+}
+
+/* === Compact Mode - Data Tables === */
+body.compact-mode .employee-assigned-table thead th,
+body.compact-mode .employee-assigned-table tbody td {
+  padding: 5px 6px;
+  font-size: 0.85rem;
+}
+
+body.compact-mode .employee-assigned-table .assigned-pill {
+  padding: 4px 6px;
+  gap: 1px;
+}
+
+body.compact-mode .employee-assigned-table .assigned-pill strong {
+  font-size: 0.8rem;
+}
+
+body.compact-mode .employee-assigned-table .assigned-pill small {
+  font-size: 0.7rem;
+}
+
+body.compact-mode .csv-preview-table th,
+body.compact-mode .csv-preview-table td {
+  padding: 6px 8px;
+  font-size: 0.82rem;
+}
+
+/* === Compact Mode - Profile Modal === */
+body.compact-mode .profile-required-card {
+  padding: 12px;
+  gap: 8px;
+}
+
+body.compact-mode .profile-avatar-preview,
+body.compact-mode .profile-avatar-fallback {
+  width: 70px;
+  height: 70px;
+  font-size: 0.8rem;
+}
+
+/* === Compact Mode - Manager Employee View === */
+body.compact-mode .manager-employee-avatar {
+  width: 80px;
+  height: 80px;
+  font-size: 0.85rem;
+}
+
+body.compact-mode .manager-employee-item {
+  grid-template-columns: 85px minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 6px;
+}
+
+body.compact-mode .issue-detail-box {
+  padding: 6px;
+  margin-top: 4px;
+}
+
+body.compact-mode .issue-detail-box p {
+  margin-bottom: 4px;
+  font-size: 0.85rem;
+}
+
+/* === Compact Mode - Mobile Responsive === */
+@media (max-width: 920px) {
+  body.compact-mode .content {
+    width: 100%;
+  }
+  
+  body.compact-mode .sidebar {
+    width: min(240px, 75vw);
+  }
+  
+  body.compact-mode .sidebar-toggle {
+    left: calc(min(240px, 75vw) - 45px);
+  }
+}
+
+@media (max-width: 480px) {
+  body.compact-mode .shell {
+    padding: 6px 6px 8px;
+  }
+  
+  body.compact-mode .sidebar {
+    width: min(220px, 70vw);
+    padding: 8px;
+  }
+  
+  body.compact-mode #btn-compact-mode {
+    width: 44px;
+    height: 44px;
+    font-size: 0.6rem;
+    right: 12px;
+    bottom: 12px;
+  }
+  
+  body.compact-mode .content {
+    padding-top: 44px;
+  }
+}
+
+/* ===== PWA UI OPTIMIZATION ===== */
+body.pwa-mode {
+  padding-top: env(safe-area-inset-top, 0);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+body.pwa-mode .backdrop {
+  opacity: 0.24;
+}
+
+body.pwa-mode .shell {
+  padding: 8px 8px calc(10px + env(safe-area-inset-bottom, 0));
+}
+
+body.pwa-mode .content {
+  gap: 8px;
+  padding-top: 52px;
+}
+
+body.pwa-mode .content-head {
+  top: 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+}
+
+body.pwa-mode .panel {
+  padding: 12px;
+  border-radius: 14px;
+}
+
+body.pwa-mode .sidebar {
+  width: min(286px, 82vw);
+  padding: 12px 12px;
+}
+
+body.pwa-mode .sidebar-toggle {
+  top: calc(8px + env(safe-area-inset-top, 0));
+  left: calc(min(286px, 82vw) - 52px);
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+}
+
+body.pwa-mode .list,
+body.pwa-mode .field-grid,
+body.pwa-mode .row {
+  gap: 8px;
+}
+
+body.pwa-mode .list-item {
+  padding: 8px 10px;
+}
+
+body.pwa-mode input,
+body.pwa-mode select,
+body.pwa-mode textarea,
+body.pwa-mode button {
+  min-height: 36px;
+  padding: 8px 10px;
+}
+
+body.pwa-mode #btn-compact-mode {
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0));
+}
+
+@media (max-width: 920px) {
+  body.pwa-mode .content {
+    padding-top: 48px;
+  }
+
+  body.pwa-mode .sidebar {
+    width: min(246px, 76vw);
+  }
+
+  body.pwa-mode .sidebar-toggle {
+    left: calc(min(246px, 76vw) - 46px);
+  }
+}
+
+@media (max-width: 480px) {
+  body.pwa-mode .shell {
+    padding: 6px 6px calc(8px + env(safe-area-inset-bottom, 0));
+  }
+
+  body.pwa-mode .content {
+    padding-top: 44px;
+  }
+
+  body.pwa-mode .panel {
+    padding: 10px;
+  }
+
+  body.pwa-mode .sidebar {
+    width: min(220px, 72vw);
+    padding: 8px;
+  }
+
+  body.pwa-mode .sidebar-toggle {
+    left: calc(min(220px, 72vw) - 42px);
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    min-height: 36px;
   }
 }

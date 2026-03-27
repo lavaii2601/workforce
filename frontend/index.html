@@ -159,10 +159,13 @@
           </div>
         </header>
 
+        <button id="btn-compact-mode" type="button" title="Bật chế độ tối giản">📦</button>
+
         <div id="route-employee-attendance" class="panel route-view hidden">
           <h3>Nhân viên - Chấm công</h3>
           <div class="row">
             <input id="attendance-note" type="text" placeholder="Ghi chú (tùy chọn)" />
+            <button id="btn-confirm-attendance" class="ghost">Xác nhận đang làm</button>
             <button id="btn-check-out" class="ghost">Check-out</button>
           </div>
           <div class="row">
@@ -180,6 +183,53 @@
 
         <div id="route-employee-shifts" class="panel route-view hidden">
           <h3>Nhân viên - Chọn ca làm trong tuần</h3>
+          <div id="employee-shifts-summary" class="summary-strip"></div>
+          <div class="schedule-col compact">
+            <h4>Cách đăng ký ca</h4>
+            <div class="field-grid">
+              <label>Kiểu đăng ký
+                <select id="employee-registration-type">
+                  <option value="individual">Đăng ký cá nhân</option>
+                  <option value="group">Đăng ký theo nhóm</option>
+                </select>
+              </label>
+              <label id="employee-group-code-wrap">Mã nhóm (khi đăng ký theo nhóm)
+                <input id="employee-group-code" type="text" placeholder="VD: TEAMA" />
+              </label>
+            </div>
+            <p class="muted">Với Ca linh hoạt, khi tick FLEX hệ thống sẽ mở bảng thông báo để bạn nhập giờ vào/ra.</p>
+            <div class="row compact">
+              <button id="btn-open-flex-editor" class="ghost hidden" type="button">Mở bảng giờ Ca linh hoạt</button>
+            </div>
+          </div>
+
+          <div id="employee-flex-editor-wrap" class="schedule-col compact hidden">
+            <div class="flex-editor-head">
+              <h4>Thiết lập giờ cho Ca linh hoạt</h4>
+              <div class="row compact">
+                <button id="btn-save-flex-hours-draft" class="ghost" type="button">Lưu</button>
+                <button id="btn-close-flex-editor" class="ghost" type="button">Ẩn</button>
+              </div>
+            </div>
+            <p class="muted">Bảng này chỉ hiện khi có ô FLEX được chọn trong lịch tuần.</p>
+            <div id="employee-flex-editor-list" class="list"></div>
+          </div>
+          <div id="employee-flex-modal-backdrop" class="flex-modal-backdrop hidden" aria-hidden="true"></div>
+
+          <div class="schedule-col compact">
+            <h4>Tham gia nhóm đăng ký ca</h4>
+            <div class="row compact">
+              <label>Chi nhánh
+                <select id="employee-group-branch"></select>
+              </label>
+              <label>Mã nhóm
+                <input id="employee-group-code-join" type="text" placeholder="Nhập mã nhóm" />
+              </label>
+              <button id="btn-employee-join-group" class="ghost">Tham gia nhóm</button>
+            </div>
+            <div id="employee-registration-groups-list" class="list"></div>
+          </div>
+
           <div id="employee-shift-grid" class="list"></div>
           <button id="btn-save-employee-shifts">Lưu đăng ký ca</button>
         </div>
@@ -222,6 +272,7 @@
           <div class="row">
             <input id="manager-attendance-note" type="text" placeholder="Ghi chú" />
             <button id="btn-manager-check-in">Check-in</button>
+            <button id="btn-manager-confirm-attendance" class="ghost">Xác nhận đang làm</button>
             <button id="btn-manager-check-out" class="ghost">Check-out</button>
           </div>
           <div class="schedule-col compact">
@@ -246,6 +297,22 @@
         <div id="route-manager-self-shifts" class="panel route-view hidden">
           <h3>Quản lý - Chọn ca làm cả tuần (dạng bảng)</h3>
           <p class="muted">Đăng ký theo từng ca và áp dụng cho toàn bộ tuần đã chọn.</p>
+          <div id="manager-self-shifts-summary" class="summary-strip"></div>
+          <div class="row compact">
+            <button id="btn-open-manager-self-flex-editor" class="ghost hidden" type="button">Mở bảng giờ Ca linh hoạt</button>
+          </div>
+          <div id="manager-self-flex-editor-wrap" class="schedule-col compact hidden">
+            <div class="flex-editor-head">
+              <h4>Thiết lập giờ FLEX của quản lý</h4>
+              <div class="row compact">
+                <button id="btn-save-manager-flex-hours-draft" class="ghost" type="button">Lưu</button>
+                <button id="btn-close-manager-self-flex-editor" class="ghost" type="button">Ẩn</button>
+              </div>
+            </div>
+            <p class="muted">Tick FLEX trong lịch tuần để hiện danh sách ngày cần nhập giờ vào/ra.</p>
+            <div id="manager-self-flex-editor-list" class="list"></div>
+          </div>
+          <div id="manager-self-flex-modal-backdrop" class="flex-modal-backdrop hidden" aria-hidden="true"></div>
           <div id="manager-self-shifts-list" class="chips"></div>
           <button id="btn-save-manager-self-shifts">Lưu ca của tôi</button>
         </div>
@@ -267,8 +334,37 @@
 
           <div id="manager-schedule-pane-preferences" class="schedule-pane active">
             <div class="schedule-col compact">
+              <h4>Tạo nhóm đăng ký ca cho nhân viên</h4>
+              <p class="muted">Quản lý có thể tạo nhóm và giới hạn số thành viên tối đa trong nhóm.</p>
+              <div class="field-grid">
+                <label>Tên nhóm
+                  <input id="manager-group-name" type="text" placeholder="VD: Nhóm Ca Sáng" />
+                </label>
+                <label>Mã nhóm (tùy chọn)
+                  <input id="manager-group-code" type="text" placeholder="VD: TEAMA" />
+                </label>
+                <label>Số lượng thành viên tối đa
+                  <input id="manager-group-max-members" type="number" min="1" max="500" value="8" />
+                </label>
+                <label>Ghi chú
+                  <input id="manager-group-note" type="text" placeholder="Ghi chú nhóm (tùy chọn)" />
+                </label>
+              </div>
+              <div class="row compact">
+                <button id="btn-manager-create-group">Tạo nhóm</button>
+              </div>
+              <div id="manager-registration-groups-list" class="list"></div>
+            </div>
+
+            <div class="schedule-col compact">
               <h4>Đăng ký nhân viên</h4>
-              <p class="muted">Tick chọn nhanh theo tuần để xếp lịch gọn hơn.</p>
+              <p class="muted">Tick chọn theo ngày để xếp lịch gọn, dễ kiểm tra.</p>
+              <div id="manager-preferences-summary" class="summary-strip"></div>
+              <div class="row compact">
+                <label>Lọc ngày
+                  <select id="manager-schedule-day-filter"></select>
+                </label>
+              </div>
               <div id="manager-preferences" class="list"></div>
               <div class="row compact">
                 <button id="btn-save-manager-schedule-inline">Lưu phân công tuần</button>
@@ -279,7 +375,13 @@
           <div id="manager-schedule-pane-assigned" class="schedule-pane hidden">
             <div class="schedule-col compact">
               <h4>Lịch đã phân theo ca</h4>
-              <p class="muted">Bảng tổng hợp nhân sự đã được phân cho từng ca.</p>
+              <p class="muted">Bảng tổng hợp nhân sự đã phân theo ngày đã chọn.</p>
+              <div id="manager-assigned-summary" class="summary-strip"></div>
+              <div class="row compact">
+                <label>Lọc ngày
+                  <select id="manager-assigned-day-filter"></select>
+                </label>
+              </div>
               <div id="manager-schedule" class="list"></div>
               <button id="btn-save-manager-schedule">Lưu lịch tuần</button>
             </div>
@@ -387,9 +489,6 @@
             </label>
             <label>Địa điểm
               <input id="ceo-branch-new-location" type="text" placeholder="VD: 21 Quang Trung, Gò Vấp" />
-            </label>
-            <label>IP router chi nhánh
-              <input id="ceo-branch-new-network-ip" type="text" placeholder="VD: 203.113.10.20" />
             </label>
             <label>&nbsp;
               <button id="btn-ceo-create-branch">Thêm chi nhánh</button>

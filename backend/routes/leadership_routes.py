@@ -110,6 +110,12 @@ def register_leadership_routes(app, deps):
                 item["branch_name"],
                 round(item["total_minutes"] / 60, 2),
                 item["attendance_sessions"],
+                item.get("work_dates", ""),
+                item.get("check_in_times", ""),
+                item.get("check_out_times", ""),
+                item.get("late_minutes_total", 0),
+                item.get("penalty_minutes_recommended", 0),
+                item.get("late_shortage_override_sessions", 0),
                 week_start,
             ]
             for item in rows
@@ -124,6 +130,12 @@ def register_leadership_routes(app, deps):
                 "branch_scope",
                 "hours_worked",
                 "attendance_sessions",
+                "work_dates",
+                "check_in_times",
+                "check_out_times",
+                "late_minutes_total",
+                "penalty_minutes_recommended",
+                "late_shortage_override_sessions",
                 "week_start",
             ],
             rows=csv_rows,
@@ -508,11 +520,8 @@ def register_leadership_routes(app, deps):
         body = request.get_json(silent=True) or {}
         name = (body.get("name") or "").strip()
         location = (body.get("location") or "").strip() or None
-        network_ip = (body.get("network_ip") or "").strip() or None
         if not name:
             return jsonify({"error": "name is required"}), 400
-        if network_ip and not is_valid_ipv4(network_ip):
-            return jsonify({"error": "network_ip must be a valid IPv4 address"}), 400
 
         conn = get_conn()
         branch = conn.execute(
@@ -522,6 +531,14 @@ def register_leadership_routes(app, deps):
         if not branch:
             conn.close()
             return jsonify({"error": "Branch not found"}), 404
+
+        if "network_ip" in body:
+            network_ip = (body.get("network_ip") or "").strip() or None
+            if network_ip and not is_valid_ipv4(network_ip):
+                conn.close()
+                return jsonify({"error": "network_ip must be a valid IPv4 address"}), 400
+        else:
+            network_ip = branch["network_ip"]
 
         dup = conn.execute(
             "SELECT 1 FROM branches WHERE LOWER(name) = LOWER(?) AND id != ?",

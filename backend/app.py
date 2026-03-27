@@ -388,6 +388,20 @@ def create_app():
         day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=day_of_week - 1)
         return day_dt.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
 
+    def _day_datetime_from_hhmm(week_start, day_of_week, hhmm_text):
+        text = (hhmm_text or "").strip()
+        if not text:
+            return None
+        parts = text.split(":")
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            return None
+        hour = int(parts[0])
+        minute = int(parts[1])
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            return None
+        day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=day_of_week - 1)
+        return day_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
     def _upsert_shift_attendance_mark(
         conn,
         *,
@@ -494,7 +508,137 @@ def create_app():
                 """,
                 (start_dt, end_dt),
             ).fetchall()
-        return [dict(row) for row in rows]
+
+        out = [dict(row) for row in rows]
+        if not out:
+            return out
+
+        employee_ids = [int(item["employee_id"]) for item in out]
+        placeholders = ",".join(["?"] * len(employee_ids))
+
+        details_sql = f"""
+            SELECT employee_id, branch_id, check_in_at, check_out_at
+            FROM attendance_logs
+            WHERE check_in_at >= ?
+              AND check_in_at < ?
+              AND employee_id IN ({placeholders})
+        """
+        params = [start_dt, end_dt, *employee_ids]
+        if branch_id:
+            details_sql += " AND branch_id = ?"
+            params.append(branch_id)
+        details_sql += " ORDER BY employee_id, check_in_at"
+
+        detail_rows = conn.execute(details_sql, tuple(params)).fetchall()
+
+        schedule_sql = f"""
+            SELECT week_start, day_of_week, shift_code, branch_id, employee_id, flexible_start_at
+            FROM weekly_schedule
+            WHERE week_start = ?
+              AND employee_id IN ({placeholders})
+        """
+        schedule_params = [week_start, *employee_ids]
+        if branch_id:
+            schedule_sql += " AND branch_id = ?"
+            schedule_params.append(branch_id)
+        schedule_rows = conn.execute(schedule_sql, tuple(schedule_params)).fetchall()
+
+        schedule_by_emp_day = {}
+        for row in schedule_rows:
+            emp_id = int(row["employee_id"])
+            key = (emp_id, int(row["day_of_week"]), int(row["branch_id"]))
+            entries = schedule_by_emp_day.setdefault(key, [])
+
+            if row["shift_code"] == "FLEX":
+                start_dt = _day_datetime_from_hhmm(
+                    row["week_start"],
+                    row["day_of_week"],
+                    row["flexible_start_at"],
+                )
+            else:
+                start_dt = _shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
+            if start_dt:
+                entries.append(start_dt)
+
+        marks_sql = f"""
+            SELECT employee_id, status, source, week_start
+            FROM shift_attendance_marks
+            WHERE week_start = ?
+              AND employee_id IN ({placeholders})
+        """
+        mark_params = [week_start, *employee_ids]
+        if branch_id:
+            marks_sql += " AND branch_id = ?"
+            mark_params.append(branch_id)
+        mark_rows = conn.execute(marks_sql, tuple(mark_params)).fetchall()
+
+        override_count_by_emp = {}
+        for row in mark_rows:
+            if row["status"] == "present_override" and (row["source"] or "") == "manager_override_shortage":
+                emp_id = int(row["employee_id"])
+                override_count_by_emp[emp_id] = override_count_by_emp.get(emp_id, 0) + 1
+
+        by_employee = {}
+        for row in detail_rows:
+            emp_id = int(row["employee_id"])
+            bucket = by_employee.setdefault(
+                emp_id,
+                {
+                    "dates": [],
+                    "seen_dates": set(),
+                    "check_ins": [],
+                    "check_outs": [],
+                    "late_minutes_total": 0,
+                },
+            )
+
+            check_in_raw = str(row["check_in_at"] or "").strip()
+            check_out_raw = str(row["check_out_at"] or "").strip()
+
+            date_part = check_in_raw.split(" ")[0] if check_in_raw else ""
+            if date_part and date_part not in bucket["seen_dates"]:
+                bucket["seen_dates"].add(date_part)
+                bucket["dates"].append(date_part)
+
+            if check_in_raw:
+                bucket["check_ins"].append(check_in_raw)
+            if check_out_raw:
+                bucket["check_outs"].append(check_out_raw)
+
+            if check_in_raw:
+                try:
+                    check_in_dt = _parse_db_datetime(check_in_raw)
+                    _, day_of_week = _week_start_and_day_for_datetime(check_in_dt)
+                    schedule_key = (emp_id, day_of_week, int(row["branch_id"]))
+                    starts = schedule_by_emp_day.get(schedule_key) or []
+                    if starts:
+                        nearest_start = min(starts, key=lambda dt: abs((check_in_dt - dt).total_seconds()))
+                        if check_in_dt > nearest_start:
+                            bucket["late_minutes_total"] += int((check_in_dt - nearest_start).total_seconds() // 60)
+                except (TypeError, ValueError):
+                    pass
+
+        for item in out:
+            detail = by_employee.get(int(item["employee_id"]))
+            if not detail:
+                item["work_dates"] = ""
+                item["check_in_times"] = ""
+                item["check_out_times"] = ""
+                item["late_minutes_total"] = 0
+                item["penalty_minutes_recommended"] = 0
+                item["late_shortage_override_sessions"] = 0
+                continue
+
+            item["work_dates"] = " | ".join(detail["dates"])
+            item["check_in_times"] = " | ".join(detail["check_ins"])
+            item["check_out_times"] = " | ".join(detail["check_outs"])
+            item["late_minutes_total"] = int(detail["late_minutes_total"])
+            item["penalty_minutes_recommended"] = int(detail["late_minutes_total"])
+            item["late_shortage_override_sessions"] = int(
+                override_count_by_emp.get(int(item["employee_id"]), 0)
+            )
+
+        return out
 
     def _csv_response(filename, headers, rows):
         buf = io.StringIO()
@@ -541,18 +685,15 @@ def create_app():
     def _build_branch_create_audit_details(name, location, network_ip):
         return (
             f"Da tao chi nhanh \"{name}\". "
-            f"Dia diem: {_audit_text(location)}. "
-            f"IP router: {_audit_text(network_ip, 'chua cau hinh')}."
+            f"Dia diem: {_audit_text(location)}."
         )
 
     def _build_branch_update_audit_details(branch_before, *, name, location, network_ip):
         old_name = (branch_before["name"] or "").strip()
         old_location = (branch_before["location"] or "").strip()
-        old_network_ip = (branch_before["network_ip"] or "").strip()
 
         new_name = (name or "").strip()
         new_location = (location or "").strip()
-        new_network_ip = (network_ip or "").strip()
 
         changes = []
         if old_name != new_name:
@@ -561,13 +702,6 @@ def create_app():
             changes.append(
                 f"Cap nhat dia diem tu \"{_audit_text(old_location)}\" sang \"{_audit_text(new_location)}\"."
             )
-        if old_network_ip != new_network_ip:
-            changes.append(
-                "Cap nhat IP router "
-                f"tu \"{_audit_text(old_network_ip, 'chua cau hinh')}\" "
-                f"sang \"{_audit_text(new_network_ip, 'chua cau hinh')}\"."
-            )
-
         if not changes:
             return f"Da mo cap nhat cho chi nhanh \"{_audit_text(new_name)}\" nhung khong co thay doi du lieu."
 
@@ -576,8 +710,7 @@ def create_app():
     def _build_branch_delete_audit_details(branch_before):
         name = _audit_text(branch_before["name"])
         location = _audit_text(branch_before["location"])
-        network_ip = _audit_text(branch_before["network_ip"], "chua cau hinh")
-        return f"Da xoa chi nhanh \"{name}\". Dia diem cu: {location}. IP router cu: {network_ip}."
+        return f"Da xoa chi nhanh \"{name}\". Dia diem cu: {location}."
 
     def _normalize_day_of_week(value, *, allow_zero=False):
         try:
@@ -643,9 +776,14 @@ def create_app():
 
         return True, None
 
-    def _generate_one_time_attendance_code():
+    def _generate_one_time_attendance_code(length=8):
         alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-        return "".join(secrets.choice(alphabet) for _ in range(8))
+        try:
+            size = int(length)
+        except (TypeError, ValueError):
+            size = 8
+        size = min(16, max(4, size))
+        return "".join(secrets.choice(alphabet) for _ in range(size))
 
     def _build_static_branch_qr_payload(branch_id, qr_token):
         return f"WM2|{branch_id}|{qr_token}"
@@ -733,14 +871,17 @@ def create_app():
         rules = {row["shift_code"]: {"min_staff": row["min_staff"], "max_staff": row["max_staff"]} for row in rows}
         # Fallback defaults for old data or missing rows.
         for shift in SHIFT_DEFINITIONS:
-            rules.setdefault(shift["code"], {"min_staff": 3, "max_staff": 4})
+            if shift["code"] == "FLEX":
+                rules.setdefault(shift["code"], {"min_staff": 0, "max_staff": 999})
+            else:
+                rules.setdefault(shift["code"], {"min_staff": 3, "max_staff": 4})
         return rules
 
     def _resolve_today_shift_for_checkin(conn, employee_id, branch_id, current_dt):
         week_start, day_of_week = _week_start_and_day_for_datetime(current_dt)
         rows = conn.execute(
             """
-            SELECT id, week_start, day_of_week, shift_code
+                        SELECT id, week_start, day_of_week, shift_code, flexible_start_at, flexible_end_at
             FROM weekly_schedule
             WHERE employee_id = ?
               AND branch_id = ?
@@ -755,10 +896,19 @@ def create_app():
 
         enriched = []
         for row in rows:
-            start_dt = _shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
-            if not start_dt:
-                continue
-            late_deadline = start_dt + timedelta(minutes=15)
+            if row["shift_code"] == "FLEX":
+                start_dt = _day_datetime_from_hhmm(
+                    row["week_start"],
+                    row["day_of_week"],
+                    row["flexible_start_at"],
+                ) or current_dt
+                # Flexible shifts should not be auto-marked absent by fixed 15-minute rule.
+                late_deadline = current_dt + timedelta(hours=24)
+            else:
+                start_dt = _shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
+                if not start_dt:
+                    continue
+                late_deadline = start_dt + timedelta(minutes=15)
             enriched.append((row, start_dt, late_deadline))
 
         if not enriched:

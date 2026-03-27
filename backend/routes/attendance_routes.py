@@ -24,6 +24,19 @@ def register_attendance_routes(app, deps):
     attendance_qr_one_time_ttl_seconds = deps["ATTENDANCE_QR_ONE_TIME_TTL_SECONDS"]
     attendance_qr_enabled = deps.get("ATTENDANCE_QR_ENABLED", True)
 
+    def _log_attendance_confirmation(conn, attendance_id, employee_id, branch_id, source, note=None):
+        conn.execute(
+            """
+            INSERT INTO attendance_confirm_logs(attendance_log_id, employee_id, branch_id, source, note)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (attendance_id, employee_id, branch_id, source, note),
+        )
+        conn.execute(
+            "UPDATE attendance_logs SET confirmed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (attendance_id,),
+        )
+
     def _ensure_attendance_qr_enabled():
         if attendance_qr_enabled:
             return None
@@ -83,14 +96,59 @@ def register_attendance_routes(app, deps):
 
         cur = conn.execute(
             """
-            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, note)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, confirmed_at, note)
+            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
             """,
             (user["id"], branch_id, note),
+        )
+        _log_attendance_confirmation(
+            conn,
+            attendance_id=cur.lastrowid,
+            employee_id=user["id"],
+            branch_id=branch_id,
+            source="check_in",
+            note="Xac nhan cham cong khi check-in",
         )
         conn.commit()
         conn.close()
         return jsonify({"message": "Checked in", "attendance_id": cur.lastrowid}), 201
+
+    @app.post("/api/attendance/confirm-open")
+    def attendance_confirm_open():
+        user, error = get_user_from_token(roles={"employee", "manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        note = (body.get("note") or "").strip() or None
+
+        conn = get_conn()
+        open_log = conn.execute(
+            """
+            SELECT id, branch_id
+            FROM attendance_logs
+            WHERE employee_id = ?
+              AND check_out_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user["id"],),
+        ).fetchone()
+        if not open_log:
+            conn.close()
+            return jsonify({"error": "No open attendance session to confirm"}), 400
+
+        _log_attendance_confirmation(
+            conn,
+            attendance_id=open_log["id"],
+            employee_id=user["id"],
+            branch_id=open_log["branch_id"],
+            source="manual_confirm",
+            note=note,
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Attendance confirmed", "attendance_id": open_log["id"]})
 
     @app.post("/api/attendance/check-out")
     def attendance_check_out():
@@ -101,7 +159,7 @@ def register_attendance_routes(app, deps):
         conn = get_conn()
         open_log = conn.execute(
             """
-            SELECT id, check_in_at
+                        SELECT id, check_in_at, confirmed_at
             FROM attendance_logs
             WHERE employee_id = ?
               AND check_out_at IS NULL
@@ -114,8 +172,10 @@ def register_attendance_routes(app, deps):
             conn.close()
             return jsonify({"error": "No open attendance session to check-out"}), 400
 
-        check_in_dt = parse_db_datetime(open_log["check_in_at"])
-        minutes = max(1, int((datetime.now() - check_in_dt).total_seconds() // 60))
+        # Business rule: payroll minutes must be anchored to the actual check-in time.
+        anchor_raw = open_log["check_in_at"]
+        anchor_dt = parse_db_datetime(anchor_raw)
+        minutes = max(1, int((datetime.now() - anchor_dt).total_seconds() // 60))
         conn.execute(
             """
             UPDATE attendance_logs
@@ -127,7 +187,7 @@ def register_attendance_routes(app, deps):
         )
         conn.commit()
         conn.close()
-        return jsonify({"message": "Checked out", "minutes_worked": minutes})
+        return jsonify({"message": "Checked out", "minutes_worked": minutes, "minutes_anchor": "check_in_at"})
 
     @app.get("/api/attendance/my-week")
     def attendance_my_week():
@@ -145,6 +205,7 @@ def register_attendance_routes(app, deps):
             """
             SELECT a.id,
                    a.check_in_at,
+                     a.confirmed_at,
                    a.check_out_at,
                    COALESCE(a.minutes_worked, 0) AS minutes_worked,
                    a.note,
@@ -190,7 +251,7 @@ def register_attendance_routes(app, deps):
         if expires_at_dt <= now_dt:
             expires_at_dt = expires_at_dt + timedelta(days=1)
         expires_ts = int(expires_at_dt.timestamp())
-        qr_nonce = f"DAY_{now_dt.strftime('%Y%m%d')}"
+        qr_nonce = f"DAY_{now_dt.strftime('%Y%m%d')}_{int(now_dt.timestamp())}_{generate_one_time_attendance_code(6)}"
         qr_token = build_attendance_qr_token(branch["id"], expires_ts, qr_nonce)
         expires_at = format_db_datetime(expires_at_dt)
         conn.close()
@@ -377,10 +438,19 @@ def register_attendance_routes(app, deps):
         )
         cur = conn.execute(
             """
-            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, note)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, confirmed_at, note)
+            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
             """,
             (user["id"], branch_id, note),
+        )
+
+        _log_attendance_confirmation(
+            conn,
+            attendance_id=cur.lastrowid,
+            employee_id=user["id"],
+            branch_id=branch_id,
+            source="check_in_qr_one_time",
+            note="Xac nhan cham cong khi check-in QR",
         )
 
         upsert_shift_attendance_mark(

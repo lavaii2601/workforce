@@ -1,4 +1,5 @@
 import re
+import secrets
 from datetime import datetime, timedelta
 
 from flask import jsonify, request
@@ -20,6 +21,27 @@ def register_operations_routes(app, deps):
 
     shift_code_set = deps["SHIFT_CODE_SET"]
     shift_definitions = deps["SHIFT_DEFINITIONS"]
+
+    def _normalize_registration_type(value):
+        text = (value or "individual").strip().lower()
+        if text in {"group", "individual"}:
+            return text
+        return None
+
+    def _sanitize_group_code(value):
+        text = re.sub(r"[^A-Za-z0-9_-]", "", (value or "").strip().upper())
+        return text[:32]
+
+    def _normalize_hhmm(value):
+        text = (value or "").strip()
+        if not text:
+            return None
+        if not re.match(r"^\d{2}:\d{2}$", text):
+            return None
+        hour, minute = [int(part) for part in text.split(":")]
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            return None
+        return f"{hour:02d}:{minute:02d}"
 
     @app.post("/api/issues")
     def create_issue():
@@ -115,6 +137,260 @@ def register_operations_routes(app, deps):
 
         return jsonify([dict(row) for row in rows])
 
+    @app.get("/api/employee/registration-groups")
+    def employee_registration_groups_get():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT g.id,
+                   g.group_code,
+                   g.group_name,
+                   g.week_start,
+                   g.branch_id,
+                     g.max_members,
+                   b.name AS branch_name,
+                   g.created_by_employee_id,
+                   g.note,
+                   g.created_at,
+                   COUNT(m.employee_id) AS member_count
+            FROM shift_registration_groups g
+            JOIN branches b ON b.id = g.branch_id
+            LEFT JOIN shift_registration_group_members m ON m.group_id = g.id
+            WHERE g.week_start = ?
+              AND g.branch_id IN (
+                  SELECT branch_id FROM employee_branch_access WHERE employee_id = ?
+              )
+            GROUP BY g.id, g.group_code, g.group_name, g.week_start, g.branch_id, b.name,
+                     g.max_members, g.created_by_employee_id, g.note, g.created_at
+            ORDER BY g.created_at DESC
+            """,
+            (week_start, user["id"]),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
+    @app.get("/api/manager/registration-groups")
+    def manager_registration_groups_get():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT g.id,
+                   g.group_code,
+                   g.group_name,
+                   g.week_start,
+                   g.branch_id,
+                   g.max_members,
+                   g.created_by_employee_id,
+                   g.note,
+                   g.created_at,
+                   COUNT(m.employee_id) AS member_count
+            FROM shift_registration_groups g
+            LEFT JOIN shift_registration_group_members m ON m.group_id = g.id
+            WHERE g.week_start = ?
+              AND g.branch_id = ?
+            GROUP BY g.id, g.group_code, g.group_name, g.week_start, g.branch_id,
+                     g.max_members, g.created_by_employee_id, g.note, g.created_at
+            ORDER BY g.created_at DESC
+            """,
+            (week_start, user["branch_id"]),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
+    @app.post("/api/manager/registration-groups")
+    def manager_registration_groups_create():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        week_start = (body.get("week_start") or "").strip()
+        group_name = (body.get("group_name") or "").strip()
+        note = (body.get("note") or "").strip() or None
+        group_code = _sanitize_group_code(body.get("group_code"))
+
+        try:
+            max_members = int(body.get("max_members"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "max_members is required and must be an integer"}), 400
+
+        if max_members < 1 or max_members > 500:
+            return jsonify({"error": "max_members must be between 1 and 500"}), 400
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+        if not group_name:
+            return jsonify({"error": "group_name is required"}), 400
+
+        if not group_code:
+            seed = secrets.token_hex(2).upper()
+            group_code = _sanitize_group_code(f"G{week_start.replace('-', '')}{seed}")
+
+        conn = get_conn()
+        conn.execute(
+            """
+            INSERT INTO shift_registration_groups(
+                group_code,
+                group_name,
+                week_start,
+                branch_id,
+                max_members,
+                created_by_employee_id,
+                note
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (group_code, group_name, week_start, user["branch_id"], max_members, user["id"], note),
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({"message": "Manager created registration group", "group_code": group_code, "max_members": max_members}), 201
+
+    @app.post("/api/employee/registration-groups")
+    def employee_registration_groups_create():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        week_start = (body.get("week_start") or "").strip()
+        group_name = (body.get("group_name") or "").strip()
+        note = (body.get("note") or "").strip() or None
+        branch_id = body.get("branch_id")
+        group_code = _sanitize_group_code(body.get("group_code"))
+        max_members_raw = body.get("max_members")
+
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+        if not group_name:
+            return jsonify({"error": "group_name is required"}), 400
+        try:
+            branch_id = int(branch_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "branch_id must be an integer"}), 400
+
+        max_members = None
+        if max_members_raw is not None:
+            try:
+                max_members = int(max_members_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "max_members must be an integer"}), 400
+            if max_members < 1 or max_members > 500:
+                return jsonify({"error": "max_members must be between 1 and 500"}), 400
+
+        conn = get_conn()
+        allowed = conn.execute(
+            "SELECT 1 FROM employee_branch_access WHERE employee_id = ? AND branch_id = ? LIMIT 1",
+            (user["id"], branch_id),
+        ).fetchone()
+        if not allowed:
+            conn.close()
+            return jsonify({"error": "Branch is not in employee access scope"}), 403
+
+        if not group_code:
+            seed = secrets.token_hex(2).upper()
+            group_code = _sanitize_group_code(f"G{week_start.replace('-', '')}{seed}")
+
+        cur = conn.execute(
+            """
+            INSERT INTO shift_registration_groups(
+                group_code, group_name, week_start, branch_id, max_members, created_by_employee_id, note
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (group_code, group_name, week_start, branch_id, max_members, user["id"], note),
+        )
+        conn.execute(
+            """
+            INSERT INTO shift_registration_group_members(group_id, employee_id)
+            VALUES (?, ?)
+            ON CONFLICT(group_id, employee_id) DO NOTHING
+            """,
+            (cur.lastrowid, user["id"]),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Created registration group", "group_code": group_code}), 201
+
+    @app.post("/api/employee/registration-groups/join")
+    def employee_registration_groups_join():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        week_start = (body.get("week_start") or "").strip()
+        group_code = _sanitize_group_code(body.get("group_code"))
+        branch_id = body.get("branch_id")
+
+        if not week_start or not group_code:
+            return jsonify({"error": "week_start and group_code are required"}), 400
+        try:
+            branch_id = int(branch_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "branch_id must be an integer"}), 400
+
+        conn = get_conn()
+        allowed = conn.execute(
+            "SELECT 1 FROM employee_branch_access WHERE employee_id = ? AND branch_id = ? LIMIT 1",
+            (user["id"], branch_id),
+        ).fetchone()
+        if not allowed:
+            conn.close()
+            return jsonify({"error": "Branch is not in employee access scope"}), 403
+
+        group_row = conn.execute(
+            """
+                        SELECT id, max_members
+            FROM shift_registration_groups
+            WHERE week_start = ?
+              AND branch_id = ?
+              AND group_code = ?
+            LIMIT 1
+            """,
+            (week_start, branch_id, group_code),
+        ).fetchone()
+        if not group_row:
+            conn.close()
+            return jsonify({"error": "Registration group not found"}), 404
+
+        if group_row["max_members"] is not None:
+            current_members = conn.execute(
+                "SELECT COUNT(*) AS c FROM shift_registration_group_members WHERE group_id = ?",
+                (group_row["id"],),
+            ).fetchone()["c"]
+            if current_members >= int(group_row["max_members"]):
+                conn.close()
+                return jsonify({"error": "Nhóm đã đủ số lượng thành viên"}), 400
+
+        conn.execute(
+            """
+            INSERT INTO shift_registration_group_members(group_id, employee_id)
+            VALUES (?, ?)
+            ON CONFLICT(group_id, employee_id) DO NOTHING
+            """,
+            (group_row["id"], user["id"]),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Joined registration group", "group_code": group_code})
+
     @app.put("/api/employee/preferences")
     def upsert_preferences():
         user, error = get_user_from_token(roles={"employee"})
@@ -142,9 +418,20 @@ def register_operations_routes(app, deps):
         valid_rows = []
         seen = set()
         for item in selections:
-            branch_id = item.get("branch_id")
+            if not isinstance(item, dict):
+                conn.close()
+                return jsonify({"error": "Each selection must be an object"}), 400
+            try:
+                branch_id = int(item.get("branch_id"))
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"error": "branch_id must be an integer"}), 400
             shift_code = item.get("shift_code")
             day_of_week = normalize_day_of_week(item.get("day_of_week"))
+            registration_type = _normalize_registration_type(item.get("registration_type"))
+            group_code = _sanitize_group_code(item.get("group_code"))
+            flexible_start_at = _normalize_hhmm(item.get("flexible_start_at"))
+            flexible_end_at = _normalize_hhmm(item.get("flexible_end_at"))
             if branch_id not in allowed_branch_ids:
                 conn.close()
                 return jsonify({"error": f"Branch {branch_id} not allowed"}), 400
@@ -154,11 +441,58 @@ def register_operations_routes(app, deps):
             if day_of_week is None:
                 conn.close()
                 return jsonify({"error": "day_of_week must be in range 1..7"}), 400
-            key = (branch_id, shift_code, day_of_week)
+            if registration_type is None:
+                conn.close()
+                return jsonify({"error": "registration_type must be individual or group"}), 400
+            if registration_type == "group":
+                if not group_code:
+                    conn.close()
+                    return jsonify({"error": "group_code is required when registration_type=group"}), 400
+                group_exists = conn.execute(
+                    """
+                    SELECT 1
+                    FROM shift_registration_groups
+                    WHERE week_start = ?
+                      AND branch_id = ?
+                      AND group_code = ?
+                    LIMIT 1
+                    """,
+                    (week_start, branch_id, group_code),
+                ).fetchone()
+                if not group_exists:
+                    conn.close()
+                    return jsonify({"error": f"Group code {group_code} not found for selected week/branch"}), 400
+            else:
+                group_code = None
+
+            if shift_code == "FLEX":
+                if not flexible_start_at or not flexible_end_at:
+                    conn.close()
+                    return jsonify({"error": "Ca linh hoạt yêu cầu flexible_start_at và flexible_end_at theo định dạng HH:MM"}), 400
+                if flexible_end_at <= flexible_start_at:
+                    conn.close()
+                    return jsonify({"error": "flexible_end_at phải lớn hơn flexible_start_at"}), 400
+            else:
+                flexible_start_at = None
+                flexible_end_at = None
+
+            key = (branch_id, shift_code, day_of_week, registration_type, group_code, flexible_start_at, flexible_end_at)
             if key in seen:
                 continue
             seen.add(key)
-            valid_rows.append((user["id"], week_start, branch_id, shift_code, day_of_week))
+            valid_rows.append(
+                (
+                    user["id"],
+                    week_start,
+                    branch_id,
+                    shift_code,
+                    day_of_week,
+                    registration_type,
+                    group_code,
+                    flexible_start_at,
+                    flexible_end_at,
+                )
+            )
 
         conn.execute(
             "DELETE FROM shift_preferences WHERE employee_id = ? AND week_start = ?",
@@ -167,8 +501,18 @@ def register_operations_routes(app, deps):
         if valid_rows:
             conn.executemany(
                 """
-                INSERT INTO shift_preferences(employee_id, week_start, branch_id, shift_code, day_of_week)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO shift_preferences(
+                    employee_id,
+                    week_start,
+                    branch_id,
+                    shift_code,
+                    day_of_week,
+                    registration_type,
+                    group_code,
+                    flexible_start_at,
+                    flexible_end_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 valid_rows,
             )
@@ -189,7 +533,16 @@ def register_operations_routes(app, deps):
         conn = get_conn()
         rows = conn.execute(
             """
-            SELECT sp.id, sp.week_start, sp.branch_id, b.name AS branch_name, sp.shift_code, sp.day_of_week
+            SELECT sp.id,
+                   sp.week_start,
+                   sp.branch_id,
+                   b.name AS branch_name,
+                   sp.shift_code,
+                   sp.day_of_week,
+                   sp.registration_type,
+                   sp.group_code,
+                   sp.flexible_start_at,
+                   sp.flexible_end_at
             FROM shift_preferences sp
             JOIN branches b ON b.id = sp.branch_id
             WHERE sp.employee_id = ? AND sp.week_start = ?
@@ -218,6 +571,10 @@ def register_operations_routes(app, deps):
                    ws.week_start,
                    ws.shift_code,
                    ws.day_of_week,
+                     ws.registration_type,
+                     ws.group_code,
+                     ws.flexible_start_at,
+                     ws.flexible_end_at,
                    ws.branch_id,
                    b.name AS branch_name,
                    m.display_name AS assigned_by_name
@@ -254,7 +611,11 @@ def register_operations_routes(app, deps):
                    sp.branch_id,
                    b.name AS branch_name,
                    sp.shift_code,
-                   sp.day_of_week
+                     sp.day_of_week,
+                     sp.registration_type,
+                     sp.group_code,
+                     sp.flexible_start_at,
+                     sp.flexible_end_at
             FROM shift_preferences sp
             JOIN users u ON u.id = sp.employee_id
             JOIN branches b ON b.id = sp.branch_id
@@ -288,7 +649,14 @@ def register_operations_routes(app, deps):
         normalized = []
         seen = set()
         for item in assignments:
-            employee_id = item.get("employee_id")
+            if not isinstance(item, dict):
+                conn.close()
+                return jsonify({"error": "Each assignment must be an object"}), 400
+            try:
+                employee_id = int(item.get("employee_id"))
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"error": "employee_id must be an integer"}), 400
             shift_code = item.get("shift_code")
             day_of_week = normalize_day_of_week(item.get("day_of_week"))
             if shift_code not in shift_code_set:
@@ -298,9 +666,36 @@ def register_operations_routes(app, deps):
                 conn.close()
                 return jsonify({"error": "day_of_week must be in range 1..7"}), 400
 
-            pref_exists = conn.execute(
+            in_scope = conn.execute(
                 """
                 SELECT 1
+                FROM users u
+                WHERE u.id = ?
+                  AND (
+                        (u.role = 'employee' AND EXISTS (
+                            SELECT 1
+                            FROM employee_branch_access eba
+                            WHERE eba.employee_id = u.id
+                              AND eba.branch_id = ?
+                        ))
+                     OR (u.role = 'manager' AND u.branch_id = ?)
+                  )
+                LIMIT 1
+                """,
+                (employee_id, user["branch_id"], user["branch_id"]),
+            ).fetchone()
+            if not in_scope:
+                conn.close()
+                return jsonify(
+                    {
+                        "error": "Employee is outside manager branch scope",
+                        "employee_id": employee_id,
+                    }
+                ), 400
+
+            pref_exists = conn.execute(
+                """
+                SELECT registration_type, group_code, flexible_start_at, flexible_end_at
                 FROM shift_preferences
                 WHERE employee_id = ?
                   AND week_start = ?
@@ -310,25 +705,39 @@ def register_operations_routes(app, deps):
                 """,
                 (employee_id, week_start, user["branch_id"], shift_code, day_of_week),
             ).fetchone()
-            if not pref_exists:
-                conn.close()
-                return jsonify(
-                    {
-                        "error": "Only selected shifts can be assigned",
-                        "employee_id": employee_id,
-                        "shift_code": shift_code,
-                        "day_of_week": day_of_week,
-                    }
-                ), 400
 
             key = (employee_id, shift_code, day_of_week)
             if key in seen:
                 continue
             seen.add(key)
-            normalized.append((week_start, user["branch_id"], employee_id, shift_code, day_of_week, user["id"]))
+
+            registration_type = "individual"
+            group_code = None
+            flexible_start_at = None
+            flexible_end_at = None
+            if pref_exists:
+                registration_type = pref_exists["registration_type"] or "individual"
+                group_code = pref_exists["group_code"]
+                flexible_start_at = pref_exists["flexible_start_at"]
+                flexible_end_at = pref_exists["flexible_end_at"]
+
+            normalized.append(
+                (
+                    week_start,
+                    user["branch_id"],
+                    employee_id,
+                    shift_code,
+                    day_of_week,
+                    registration_type,
+                    group_code,
+                    flexible_start_at,
+                    flexible_end_at,
+                    user["id"],
+                )
+            )
 
         counts = {}
-        for _, _, _, shift_code, day_of_week, _ in normalized:
+        for _, _, _, shift_code, day_of_week, *_ in normalized:
             key = (shift_code, day_of_week)
             counts[key] = counts.get(key, 0) + 1
 
@@ -377,8 +786,12 @@ def register_operations_routes(app, deps):
                     employee_id,
                     shift_code,
                     day_of_week,
+                    registration_type,
+                    group_code,
+                    flexible_start_at,
+                    flexible_end_at,
                     assigned_by
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 normalized,
             )
@@ -398,7 +811,8 @@ def register_operations_routes(app, deps):
 
         payload = []
         for shift in shift_definitions:
-            rule = rules.get(shift["code"], {"min_staff": 3, "max_staff": 4})
+            default_rule = {"min_staff": 0, "max_staff": 999} if shift["code"] == "FLEX" else {"min_staff": 3, "max_staff": 4}
+            rule = rules.get(shift["code"], default_rule)
             payload.append(
                 {
                     "shift_code": shift["code"],
@@ -474,6 +888,10 @@ def register_operations_routes(app, deps):
                    u.display_name AS employee_name,
                    ws.shift_code,
                    ws.day_of_week,
+                     ws.registration_type,
+                     ws.group_code,
+                     ws.flexible_start_at,
+                     ws.flexible_end_at,
                    ws.week_start,
                    ws.branch_id,
                    b.name AS branch_name
@@ -506,6 +924,8 @@ def register_operations_routes(app, deps):
                    ws.week_start,
                    ws.day_of_week,
                    ws.shift_code,
+                     ws.flexible_start_at,
+                     ws.flexible_end_at,
                    ws.branch_id,
                    ws.employee_id,
                    u.display_name AS employee_name,
@@ -514,7 +934,9 @@ def register_operations_routes(app, deps):
                    m.note,
                    m.updated_at,
                    m.marked_by_manager_id,
-                   m.attendance_log_id
+                     m.attendance_log_id,
+                     al.check_in_at AS attendance_check_in_at,
+                     al.check_out_at AS attendance_check_out_at
             FROM weekly_schedule ws
             JOIN users u ON u.id = ws.employee_id
             LEFT JOIN shift_attendance_marks m
@@ -523,6 +945,8 @@ def register_operations_routes(app, deps):
                   AND m.shift_code = ws.shift_code
                   AND m.branch_id = ws.branch_id
                   AND m.employee_id = ws.employee_id
+                 LEFT JOIN attendance_logs al
+                     ON al.id = m.attendance_log_id
             WHERE ws.branch_id = ?
               AND ws.week_start = ?
               AND ws.day_of_week = ?
@@ -542,20 +966,42 @@ def register_operations_routes(app, deps):
             if not status:
                 status = "late_unmarked" if current_dt > late_deadline_dt else "pending"
 
+            check_in_raw = row["attendance_check_in_at"]
+            late_minutes = 0
+            if check_in_raw:
+                try:
+                    check_in_dt = datetime.strptime(str(check_in_raw), "%Y-%m-%d %H:%M:%S")
+                    if check_in_dt > start_dt:
+                        late_minutes = int((check_in_dt - start_dt).total_seconds() // 60)
+                except (TypeError, ValueError):
+                    late_minutes = 0
+
+            is_late_shortage_override = (
+                status == "present_override"
+                and (row["source"] or "") == "manager_override_shortage"
+                and late_minutes > 0
+            )
+
             items.append(
                 {
                     "schedule_id": row["schedule_id"],
                     "week_start": row["week_start"],
                     "day_of_week": row["day_of_week"],
                     "shift_code": row["shift_code"],
+                    "flexible_start_at": row["flexible_start_at"],
+                    "flexible_end_at": row["flexible_end_at"],
                     "employee_id": row["employee_id"],
                     "employee_name": row["employee_name"],
                     "status": status,
                     "source": row["source"] or "",
                     "note": row["note"] or "",
                     "attendance_log_id": row["attendance_log_id"],
+                    "attendance_check_in_at": row["attendance_check_in_at"],
+                    "attendance_check_out_at": row["attendance_check_out_at"],
                     "shift_start_at": format_db_datetime(start_dt),
                     "late_deadline_at": format_db_datetime(late_deadline_dt),
+                    "late_minutes": late_minutes,
+                    "is_late_shortage_override": is_late_shortage_override,
                     "updated_at": row["updated_at"],
                 }
             )
@@ -577,7 +1023,7 @@ def register_operations_routes(app, deps):
 
         body = request.get_json(silent=True) or {}
         schedule_id = body.get("schedule_id")
-        note = (body.get("note") or "").strip() or "Quản lý xác nhận đi làm đúng giờ (quên chấm công)"
+        note = (body.get("note") or "").strip() or "Quan ly xac nhan vao ca do thieu nhan su"
 
         try:
             schedule_id = int(schedule_id)
@@ -599,6 +1045,35 @@ def register_operations_routes(app, deps):
             conn.close()
             return jsonify({"error": "Schedule not found in your branch"}), 404
 
+        # Ensure there is an open attendance session anchored at real override time.
+        open_log = conn.execute(
+            """
+            SELECT id
+            FROM attendance_logs
+            WHERE employee_id = ?
+              AND branch_id = ?
+              AND check_out_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (schedule["employee_id"], schedule["branch_id"]),
+        ).fetchone()
+
+        attendance_log_id = open_log["id"] if open_log else None
+        if not attendance_log_id:
+            cur = conn.execute(
+                """
+                INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, confirmed_at, note)
+                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+                """,
+                (
+                    schedule["employee_id"],
+                    schedule["branch_id"],
+                    "Manager override - thieu nhan su",
+                ),
+            )
+            attendance_log_id = cur.lastrowid
+
         upsert_shift_attendance_mark(
             conn,
             week_start=schedule["week_start"],
@@ -607,8 +1082,9 @@ def register_operations_routes(app, deps):
             branch_id=schedule["branch_id"],
             employee_id=schedule["employee_id"],
             status="present_override",
-            source="manager_override",
+            source="manager_override_shortage",
             note=note,
+            attendance_log_id=attendance_log_id,
             marked_by_manager_id=user["id"],
         )
         conn.commit()
@@ -629,7 +1105,7 @@ def register_operations_routes(app, deps):
         conn = get_conn()
         rows = conn.execute(
             """
-            SELECT id, shift_code, day_of_week
+                        SELECT id, shift_code, day_of_week, registration_type, group_code, flexible_start_at, flexible_end_at
             FROM shift_preferences
             WHERE employee_id = ?
               AND branch_id = ?
@@ -661,28 +1137,42 @@ def register_operations_routes(app, deps):
         normalized = []
         seen = set()
         for item in selections:
+            if not isinstance(item, dict):
+                return jsonify({"error": "Each selection must be an object"}), 400
             shift_code = item.get("shift_code")
             day_of_week = normalize_day_of_week(item.get("day_of_week"))
+            flexible_start_at = _normalize_hhmm(item.get("flexible_start_at"))
+            flexible_end_at = _normalize_hhmm(item.get("flexible_end_at"))
             if shift_code not in shift_code_set:
                 return jsonify({"error": f"Invalid shift code: {shift_code}"}), 400
             if day_of_week is None:
                 return jsonify({"error": "day_of_week must be in range 1..7"}), 400
+            if shift_code == "FLEX":
+                if not flexible_start_at or not flexible_end_at:
+                    return jsonify({"error": "Ca linh hoạt yêu cầu flexible_start_at và flexible_end_at theo định dạng HH:MM"}), 400
+                if flexible_end_at <= flexible_start_at:
+                    return jsonify({"error": "flexible_end_at phải lớn hơn flexible_start_at"}), 400
+            else:
+                flexible_start_at = None
+                flexible_end_at = None
             key = (shift_code, day_of_week)
             if key in seen:
                 continue
             seen.add(key)
-            normalized.append((shift_code, day_of_week))
+            normalized.append((shift_code, day_of_week, flexible_start_at, flexible_end_at))
 
         if not normalized:
             for shift_code in shifts:
                 if shift_code not in shift_code_set:
                     return jsonify({"error": f"Invalid shift code: {shift_code}"}), 400
                 for day_of_week in range(1, 8):
+                    if shift_code == "FLEX":
+                        return jsonify({"error": "Vui lòng chọn FLEX theo từng ngày và nhập giờ vào/ra"}), 400
                     key = (shift_code, day_of_week)
                     if key in seen:
                         continue
                     seen.add(key)
-                    normalized.append((shift_code, day_of_week))
+                    normalized.append((shift_code, day_of_week, None, None))
 
         conn = get_conn()
         conn.execute(
@@ -692,12 +1182,30 @@ def register_operations_routes(app, deps):
         if normalized:
             conn.executemany(
                 """
-                INSERT INTO shift_preferences(employee_id, week_start, branch_id, shift_code, day_of_week)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO shift_preferences(
+                    employee_id,
+                    week_start,
+                    branch_id,
+                    shift_code,
+                    day_of_week,
+                    registration_type,
+                    group_code,
+                    flexible_start_at,
+                    flexible_end_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'individual', NULL, ?, ?)
                 """,
                 [
-                    (user["id"], week_start, user["branch_id"], shift_code, day_of_week)
-                    for shift_code, day_of_week in normalized
+                    (
+                        user["id"],
+                        week_start,
+                        user["branch_id"],
+                        shift_code,
+                        day_of_week,
+                        flexible_start_at,
+                        flexible_end_at,
+                    )
+                    for shift_code, day_of_week, flexible_start_at, flexible_end_at in normalized
                 ],
             )
         conn.commit()
@@ -799,6 +1307,12 @@ def register_operations_routes(app, deps):
                 item["branch_name"],
                 round(item["total_minutes"] / 60, 2),
                 item["attendance_sessions"],
+                item.get("work_dates", ""),
+                item.get("check_in_times", ""),
+                item.get("check_out_times", ""),
+                item.get("late_minutes_total", 0),
+                item.get("penalty_minutes_recommended", 0),
+                item.get("late_shortage_override_sessions", 0),
                 week_start,
             ]
             for item in rows
@@ -813,6 +1327,12 @@ def register_operations_routes(app, deps):
                 "branch_name",
                 "hours_worked",
                 "attendance_sessions",
+                "work_dates",
+                "check_in_times",
+                "check_out_times",
+                "late_minutes_total",
+                "penalty_minutes_recommended",
+                "late_shortage_override_sessions",
                 "week_start",
             ],
             rows=csv_rows,

@@ -4,7 +4,17 @@ const state = {
   shifts: [],
   branches: [],
   employeeBranches: [],
-  sidebarCollapsed: localStorage.getItem("wm_sidebar_collapsed") !== "0",
+  employeeFlexTimeByKey: {},
+  employeeFlexEditorDismissed: false,
+  managerSelfFlexTimeByKey: {},
+  managerSelfFlexEditorDismissed: false,
+  sidebarCollapsed: (() => {
+    const saved = localStorage.getItem("wm_sidebar_collapsed");
+    if (saved === null) {
+      return window.innerWidth < 1200;
+    }
+    return saved !== "0";
+  })(),
   profileAvatarDataUrl: "",
   oneTimeScan: null,
   managerDailyQr: null,
@@ -30,6 +40,8 @@ const ceoExportState = {
 
 const managerScheduleUiState = {
   activeTab: "preferences",
+  selectedDay: 0,
+  assignedSelectedDay: 0,
 };
 
 const managerEmployeeUiState = {
@@ -40,7 +52,10 @@ const authUiState = {
   screen: "login",
 };
 
+let sidebarResizeRafId = null;
+
 const WEEK_DAYS = [1, 2, 3, 4, 5, 6, 7];
+const SMALL_SHIFT_CODES = ["S1", "S2", "S3", "S4"];
 const managerStaffingRules = new Map();
 
 const ROUTES = {
@@ -459,7 +474,10 @@ async function renderRoute() {
   $("#page-title").textContent = routeInfo ? routeInfo.title : "Dashboard";
 
   if (key === "employee-attendance") await loadMyAttendance("employee");
-  if (key === "employee-shifts") await loadEmployeeShifts();
+  if (key === "employee-shifts") {
+    await loadEmployeeShifts();
+    await loadEmployeeRegistrationGroups();
+  }
   if (key === "employee-assigned") await loadEmployeeAssignedSchedule();
   if (key === "employee-issues") await loadMyIssues();
 
@@ -488,7 +506,10 @@ async function renderRoute() {
     }
   }
   if (key === "manager-self-shifts") await loadManagerSelfShifts();
-  if (key === "manager-schedule") await loadManagerSchedule();
+  if (key === "manager-schedule") {
+    await loadManagerSchedule();
+    await loadManagerRegistrationGroups();
+  }
   if (key === "manager-issues") await loadManagerIssues();
   if (key === "manager-employees") await loadManagerEmployees();
 
@@ -573,9 +594,12 @@ function applySidebarState() {
   const overlay = $("#sidebar-overlay");
   if (!appView || !sidebar || !toggle || !overlay) return;
 
+  const desktopDocked = window.innerWidth >= 1200;
+
   appView.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
-  overlay.classList.toggle("hidden", state.sidebarCollapsed);
-  document.body.classList.toggle("no-scroll", !state.sidebarCollapsed);
+  appView.classList.toggle("desktop-docked", desktopDocked && !state.sidebarCollapsed);
+  overlay.classList.toggle("hidden", state.sidebarCollapsed || desktopDocked);
+  document.body.classList.toggle("no-scroll", !state.sidebarCollapsed && !desktopDocked);
   toggle.setAttribute("aria-label", state.sidebarCollapsed ? "Mo menu" : "Dong menu");
 }
 
@@ -587,6 +611,14 @@ function setSidebarCollapsed(collapsed) {
 
 function toggleSidebar() {
   setSidebarCollapsed(!state.sidebarCollapsed);
+}
+
+function scheduleApplySidebarState() {
+  if (sidebarResizeRafId != null) return;
+  sidebarResizeRafId = window.requestAnimationFrame(() => {
+    sidebarResizeRafId = null;
+    applySidebarState();
+  });
 }
 
 function fillBranchSelect(selectEl, branches, { includeAll = false, allLabel = "Tat ca" } = {}) {
@@ -653,6 +685,7 @@ async function loadEmployeeBranches() {
   state.employeeBranches = await api("/api/employee/branches");
   fillBranchSelect($("#employee-attendance-branch"), state.employeeBranches);
   fillBranchSelect($("#employee-issue-branch"), state.employeeBranches);
+  fillBranchSelect($("#employee-group-branch"), state.employeeBranches);
   fillBranchSelect($("#employee-assigned-branch-filter"), state.employeeBranches, {
     includeAll: true,
     allLabel: "Tat ca chi nhanh",
@@ -672,7 +705,10 @@ async function loadMyAttendance(viewMode) {
   data.items.forEach((item) => {
     const row = document.createElement("div");
     row.className = "list-item";
-    row.innerHTML = `<span>${item.branch_name} | ${formatDateTimeDisplay(item.check_in_at)} -> ${item.check_out_at ? formatDateTimeDisplay(item.check_out_at) : "Đang làm"}</span><strong>${(item.minutes_worked / 60).toFixed(2)}h</strong>`;
+    const confirmedText = item.confirmed_at
+      ? ` | Mốc tính công: ${formatDateTimeDisplay(item.confirmed_at)}`
+      : "";
+    row.innerHTML = `<span>${item.branch_name} | ${formatDateTimeDisplay(item.check_in_at)} -> ${item.check_out_at ? formatDateTimeDisplay(item.check_out_at) : "Đang làm"}${confirmedText}</span><strong>${(item.minutes_worked / 60).toFixed(2)}h</strong>`;
     fragment.appendChild(row);
   });
   const sum = document.createElement("div");
@@ -691,7 +727,7 @@ async function generateManagerOneTimeQr({ showToastSuccess = true } = {}) {
 
 function shiftAttendanceStatusLabel(status) {
   if (status === "present") return "Đã chấm công";
-  if (status === "present_override") return "Đã đi làm (quản lý xác nhận)";
+  if (status === "present_override") return "Đã đi làm (quản lý xác nhận thiếu nhân sự)";
   if (status === "absent") return "Vắng";
   if (status === "late_unmarked") return "Quá giờ +15 phút (chưa xác nhận)";
   return "Chờ vào ca";
@@ -743,14 +779,24 @@ async function loadManagerShiftAttendanceToday() {
     row.className = `list-item shift-attendance-item ${shiftAttendanceStatusClass(item.status)}`;
     const canOverride = item.status === "absent" || item.status === "late_unmarked";
     const safeEmployeeName = escapeHtml(item.employee_name);
-    const safeShiftCode = escapeHtml(item.shift_code);
+    const safeShiftCode = escapeHtml(shiftText(item.shift_code));
     const safeStatus = escapeHtml(shiftAttendanceStatusLabel(item.status));
     const safeNote = escapeHtml(item.note || "");
+    const lateMinutes = Number(item.late_minutes || 0);
+    const shortageWarning = item.is_late_shortage_override
+      ? `<span class="late-shortage-icon" title="Di tre ${lateMinutes}p, quan ly xac nhan do thieu nhan su">!</span>`
+      : "";
+    const flexInfo =
+      item.shift_code === "FLEX" && item.flexible_start_at && item.flexible_end_at
+        ? `<br /><small>Khung linh hoạt: ${escapeHtml(item.flexible_start_at)} - ${escapeHtml(item.flexible_end_at)}</small>`
+        : "";
     row.innerHTML = `
       <div>
         <strong>${safeEmployeeName}</strong> - ${safeShiftCode}<br />
         <small>Bắt đầu ca: ${formatDateTimeDisplay(item.shift_start_at)} | Hạn check-in: ${formatDateTimeDisplay(item.late_deadline_at)}</small><br />
-        <small>Trạng thái: <span class="shift-status-badge ${shiftAttendanceStatusClass(item.status)}">${safeStatus}</span></small>
+        ${flexInfo}
+        <small>Trạng thái: <span class="shift-status-badge ${shiftAttendanceStatusClass(item.status)}">${safeStatus}</span>${shortageWarning}</small><br />
+        <small>Tre: ${lateMinutes} phut</small>
       </div>
       <div class="row compact">
         <input type="text" data-override-note="${item.schedule_id}" placeholder="Ghi chú bằng chứng đi làm" value="${safeNote}" />
@@ -854,9 +900,47 @@ async function checkOutManager() {
   await loadManagerShiftAttendanceToday();
 }
 
+async function confirmAttendanceEmployee() {
+  const note = $("#attendance-note").value.trim();
+  await api("/api/attendance/confirm-open", {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+  showToast("Đã xác nhận mốc tính công");
+  await loadMyAttendance("employee");
+}
+
+async function confirmAttendanceManager() {
+  const note = $("#manager-attendance-note").value.trim();
+  await api("/api/attendance/confirm-open", {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+  showToast("Đã xác nhận mốc tính công");
+  await loadMyAttendance("manager");
+}
+
 function shiftText(code) {
   const s = state.shifts.find((x) => x.code === code);
-  return s ? `${s.code} (${s.start}-${s.end})` : code;
+  if (!s) return code;
+  if (s.code === "FLEX") return `${s.code} (${s.name})`;
+  return `${s.code} (${s.name}: ${s.start}-${s.end})`;
+}
+
+function shiftTimeRangeText(code) {
+  const s = state.shifts.find((x) => x.code === code);
+  if (!s) return code;
+  if (s.code === "FLEX") return "Linh hoạt";
+  if (!s.start || !s.end) return s.name || code;
+  return `${s.start}-${s.end}`;
+}
+
+function shiftRowHourLabel(code) {
+  const s = state.shifts.find((x) => x.code === code);
+  if (!s) return code;
+  if (s.code === "FLEX") return "Giờ linh hoạt";
+  if (!s.start || !s.end) return s.name || code;
+  return `${s.start}-${s.end}`;
 }
 
 function normalizeDay(value) {
@@ -895,8 +979,602 @@ function weekHeaderCellsHtml() {
     .join("");
 }
 
+function weekHeaderCellsHtmlFor(metaList) {
+  return metaList
+    .map((meta) => {
+      if (!meta.dateLabel) {
+        return `<th>${meta.label}</th>`;
+      }
+      return `<th>${meta.label}<br /><small>${meta.dateLabel}</small></th>`;
+    })
+    .join("");
+}
+
+function hhmmToMinutes(value) {
+  const text = String(value || "").trim();
+  const parts = text.split(":");
+  if (parts.length !== 2) return Number.NaN;
+  const hour = Number(parts[0]);
+  const minute = Number(parts[1]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return Number.NaN;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return Number.NaN;
+  return hour * 60 + minute;
+}
+
+function shiftRangeFromHHMM(startText, endText) {
+  const start = hhmmToMinutes(startText);
+  const end = hhmmToMinutes(endText);
+  if (Number.isNaN(start) || Number.isNaN(end) || end <= start) return null;
+  return { start, end };
+}
+
+function shiftRangeByCode(shiftCode, record = null) {
+  const normalized = String(shiftCode || "").toUpperCase();
+  const byCode = (code) => state.shifts.find((s) => String(s.code || "").toUpperCase() === code);
+  const rangeFromDefinition = (code) => {
+    const shift = byCode(code);
+    return shift ? shiftRangeFromHHMM(shift.start, shift.end) : null;
+  };
+
+  if (SMALL_SHIFT_CODES.includes(normalized)) {
+    return rangeFromDefinition(normalized);
+  }
+  if (normalized === "M1") {
+    const s1 = rangeFromDefinition("S1");
+    const s2 = rangeFromDefinition("S2");
+    if (s1 && s2) return { start: s1.start, end: s2.end };
+    return rangeFromDefinition("M1");
+  }
+  if (normalized === "M2") {
+    const s3 = rangeFromDefinition("S3");
+    const s4 = rangeFromDefinition("S4");
+    if (s3 && s4) return { start: s3.start, end: s4.end };
+    return rangeFromDefinition("M2");
+  }
+  if (normalized === "FLEX") {
+    return shiftRangeFromHHMM(record?.flexible_start_at, record?.flexible_end_at);
+  }
+  return rangeFromDefinition(normalized);
+}
+
+function rangesOverlap(a, b) {
+  if (!a || !b) return false;
+  return Math.max(a.start, b.start) < Math.min(a.end, b.end);
+}
+
+function employeeInitials(nameText) {
+  const name = String(nameText || "").trim();
+  if (!name) return "--";
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ""}${parts[parts.length - 1][0] || ""}`.toUpperCase();
+}
+
+function shiftDisplayTime(item) {
+  if (item.shift_code === "FLEX") {
+    return `${item.flexible_start_at || "--:--"}-${item.flexible_end_at || "--:--"}`;
+  }
+  const shift = state.shifts.find((s) => s.code === item.shift_code);
+  if (shift?.start && shift?.end) {
+    return `${shift.start}-${shift.end}`;
+  }
+  return item.shift_code || "--";
+}
+
+function displayRowShiftCode(record) {
+  const shiftCode = String(record?.shift_code || "").toUpperCase();
+  if (SMALL_SHIFT_CODES.includes(shiftCode)) return shiftCode;
+  if (shiftCode === "M1") return "S1";
+  if (shiftCode === "M2") return "S3";
+  if (shiftCode === "FLEX") {
+    const startMin = hhmmToMinutes(record?.flexible_start_at);
+    if (Number.isNaN(startMin)) return "S1";
+    if (startMin < 11 * 60) return "S1";
+    if (startMin < 15 * 60) return "S2";
+    if (startMin < 19 * 60) return "S3";
+    return "S4";
+  }
+  return "S1";
+}
+
+function groupScheduleRowsForDisplay(rows) {
+  const groups = new Map();
+  rows.forEach((item) => {
+    const isLarge = item.shift_code === "M1" || item.shift_code === "M2" || item.shift_code === "FLEX";
+    const key = isLarge
+      ? `${item.shift_code}|${shiftDisplayTime(item)}`
+      : `${item.shift_code}|${item.employee_id}`;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(item);
+  });
+  return [...groups.values()];
+}
+
+function compactGroupedShiftTag(items) {
+  const list = items || [];
+  if (!list.length) return "";
+  if (list.length === 1) return compactShiftTag(list[0]);
+
+  const lead = list[0];
+  const isMain = lead.shift_code === "M1" || lead.shift_code === "M2";
+  const isFlex = lead.shift_code === "FLEX";
+  const names = list
+    .map((x) => escapeHtml(x.employee_name || "-"))
+    .slice(0, 4)
+    .join(", ");
+  const suffix = list.length > 4 ? ` +${list.length - 4}` : "";
+  const timeText = escapeHtml(shiftDisplayTime(lead));
+  const extraClass = isFlex ? "is-flex" : isMain ? "is-main" : "";
+
+  return `<span class="tt-pill compact-shift-pill worker-shift-pill grouped-shift-pill ${extraClass}" title="${names}${suffix} | ${timeText}"><span class="worker-name-icon">${list.length}</span><span class="worker-shift-meta"><span class="worker-name-text">${names}${suffix}</span><small>${timeText}</small></span></span>`;
+}
+
+function collectAnchoredRows(records, rowShiftCode, day) {
+  return records.filter((item) => {
+    const days = expandDays(item.day_of_week);
+    if (!days.includes(day)) return false;
+    return displayRowShiftCode(item) === rowShiftCode;
+  });
+}
+
+function compactShiftTag(item) {
+  const name = escapeHtml(item.employee_name || "-");
+  const initials = escapeHtml(employeeInitials(item.employee_name));
+  const timeText = escapeHtml(shiftDisplayTime(item));
+  if (item.shift_code === "FLEX") {
+    return `<span class="tt-pill compact-shift-pill is-flex worker-shift-pill" title="${name} - FLEX ${timeText}"><span class="worker-name-icon">${initials}</span><span class="worker-shift-meta"><span class="worker-name-text">${name}</span><small class="flex-registered-time">${timeText}</small></span></span>`;
+  }
+  if (item.shift_code === "M1" || item.shift_code === "M2") {
+    return `<span class="tt-pill compact-shift-pill is-main worker-shift-pill" title="${name} - ${escapeHtml(item.shift_code)} ${timeText}"><span class="worker-name-icon">${initials}</span><span class="worker-shift-meta"><span class="worker-name-text">${name}</span><small>${timeText}</small></span></span>`;
+  }
+  return `<span class="tt-pill worker-shift-pill" title="${name}"><span class="worker-name-icon">${initials}</span><span class="worker-shift-meta"><span class="worker-name-text">${name}</span></span></span>`;
+}
+
+function ensureManagerDayFilterOptions() {
+  const options = [
+    { value: "0", label: "Tất cả ngày" },
+    ...weekDaysMeta().map((meta) => ({ value: String(meta.day), label: `${meta.label} (${meta.dateLabel || ""})` })),
+  ];
+
+  const bind = (selector, currentValue) => {
+    const select = $(selector);
+    if (!select) return;
+    const oldValue = select.value || String(currentValue || 0);
+    select.innerHTML = "";
+    options.forEach((op) => {
+      const node = document.createElement("option");
+      node.value = op.value;
+      node.textContent = op.label;
+      select.appendChild(node);
+    });
+    if ([...select.options].some((op) => op.value === oldValue)) {
+      select.value = oldValue;
+    }
+  };
+
+  bind("#manager-schedule-day-filter", managerScheduleUiState.selectedDay);
+  bind("#manager-assigned-day-filter", managerScheduleUiState.assignedSelectedDay);
+}
+
+function groupCapacityText(item) {
+  const count = Number(item.member_count || 0);
+  const max = item.max_members == null ? null : Number(item.max_members);
+  if (!max) return `${count} thành viên`;
+  return `${count}/${max} thành viên`;
+}
+
+function updateEmployeeRegistrationUiState() {
+  const type = $("#employee-registration-type")?.value || "individual";
+  const groupWrap = $("#employee-group-code-wrap");
+
+  if (groupWrap) {
+    groupWrap.classList.toggle("hidden", type !== "group");
+  }
+}
+
+function employeeFlexKey(branchId, dayOfWeek) {
+  return `${Number(branchId)}|FLEX|${Number(dayOfWeek)}`;
+}
+
+function parseEmployeeFlexKey(key) {
+  const [branchRaw, _shift, dayRaw] = String(key || "").split("|");
+  return {
+    branchId: Number(branchRaw || 0),
+    dayOfWeek: Number(dayRaw || 0),
+  };
+}
+
+function selectedEmployeeFlexKeys() {
+  return [...document.querySelectorAll("#employee-shift-grid input:checked[data-shift='FLEX']")].map((el) =>
+    employeeFlexKey(el.dataset.branch, el.dataset.day)
+  );
+}
+
+function currentFlexDraftStorageKey() {
+  const userId = Number(state.currentUser?.id || 0);
+  return `wm_flex_draft_${userId}_${currentWeek()}`;
+}
+
+function saveEmployeeFlexDraft() {
+  localStorage.setItem(currentFlexDraftStorageKey(), JSON.stringify(state.employeeFlexTimeByKey || {}));
+}
+
+function loadEmployeeFlexDraft() {
+  const raw = localStorage.getItem(currentFlexDraftStorageKey());
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      Object.entries(parsed).forEach(([key, value]) => {
+        const slot = value || {};
+        const start = String(slot.start || "").trim();
+        const end = String(slot.end || "").trim();
+        if (start && end && !state.employeeFlexTimeByKey[key]) {
+          state.employeeFlexTimeByKey[key] = { start, end };
+        }
+      });
+    }
+  } catch (_error) {
+    // Ignore malformed local draft and continue with server values.
+  }
+}
+
+function updateEmployeeShiftSummary() {
+  const node = $("#employee-shifts-summary");
+  if (!node) return;
+  const checkedInputs = [...document.querySelectorAll("#employee-shift-grid input:checked[data-shift]")];
+  const total = checkedInputs.length;
+  const flexChecked = checkedInputs.filter((el) => el.dataset.shift === "FLEX").length;
+  const flexCompleted = checkedInputs.filter((el) => {
+    if (el.dataset.shift !== "FLEX") return false;
+    const key = employeeFlexKey(el.dataset.branch, el.dataset.day);
+    const slot = state.employeeFlexTimeByKey[key] || { start: "", end: "" };
+    return !!slot.start && !!slot.end;
+  }).length;
+  node.innerHTML = `
+    <span class="summary-pill">Đã chọn: <strong>${total}</strong> ô</span>
+    <span class="summary-pill">FLEX: <strong>${flexChecked}</strong> ô</span>
+    <span class="summary-pill ${flexChecked > flexCompleted ? "warn" : ""}">Đã nhập giờ FLEX: <strong>${flexCompleted}/${flexChecked}</strong></span>
+  `;
+}
+
+function updateManagerSelfShiftSummary() {
+  const node = $("#manager-self-shifts-summary");
+  if (!node) return;
+  const checkedInputs = [...document.querySelectorAll("#manager-self-shifts-list input:checked[data-shift]")];
+  const total = checkedInputs.length;
+  const flexChecked = checkedInputs.filter((el) => el.dataset.shift === "FLEX").length;
+  const flexCompleted = checkedInputs.filter((el) => {
+    if (el.dataset.shift !== "FLEX") return false;
+    const key = managerSelfFlexKey(el.dataset.day);
+    const slot = state.managerSelfFlexTimeByKey[key] || { start: "", end: "" };
+    return !!slot.start && !!slot.end;
+  }).length;
+  const byShift = checkedInputs.reduce((acc, el) => {
+    const shift = el.dataset.shift || "";
+    acc[shift] = (acc[shift] || 0) + 1;
+    return acc;
+  }, {});
+  const shiftTextLine = Object.entries(byShift)
+    .slice(0, 4)
+    .map(([code, count]) => `${code}: ${count}`)
+    .join(" | ");
+  node.innerHTML = `
+    <span class="summary-pill">Tổng ô đã chọn: <strong>${total}</strong></span>
+    <span class="summary-pill">Theo ca: <strong>${escapeHtml(shiftTextLine || "Chưa chọn")}</strong></span>
+    <span class="summary-pill ${flexChecked > flexCompleted ? "warn" : ""}">Giờ FLEX: <strong>${flexCompleted}/${flexChecked}</strong></span>
+  `;
+}
+
+function managerSelfFlexKey(dayOfWeek) {
+  return `FLEX|${Number(dayOfWeek)}`;
+}
+
+function managerSelfFlexDraftStorageKey() {
+  const userId = Number(state.currentUser?.id || 0);
+  return `wm_manager_flex_draft_${userId}_${currentWeek()}`;
+}
+
+function saveManagerSelfFlexDraft() {
+  localStorage.setItem(
+    managerSelfFlexDraftStorageKey(),
+    JSON.stringify(state.managerSelfFlexTimeByKey || {})
+  );
+}
+
+function loadManagerSelfFlexDraft() {
+  const raw = localStorage.getItem(managerSelfFlexDraftStorageKey());
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      Object.entries(parsed).forEach(([key, value]) => {
+        const slot = value || {};
+        const start = String(slot.start || "").trim();
+        const end = String(slot.end || "").trim();
+        if (start && end && !state.managerSelfFlexTimeByKey[key]) {
+          state.managerSelfFlexTimeByKey[key] = { start, end };
+        }
+      });
+    }
+  } catch (_error) {
+    // Ignore malformed local draft and continue with server values.
+  }
+}
+
+function parseManagerSelfFlexKey(key) {
+  const [_shift, dayRaw] = String(key || "").split("|");
+  return { dayOfWeek: Number(dayRaw || 0) };
+}
+
+function selectedManagerSelfFlexKeys() {
+  return [...document.querySelectorAll("#manager-self-shifts-list input:checked[data-shift='FLEX']")].map((el) =>
+    managerSelfFlexKey(el.dataset.day)
+  );
+}
+
+function refreshManagerSelfFlexCells() {
+  document.querySelectorAll("#manager-self-shifts-list input[data-shift='FLEX']").forEach((input) => {
+    if (!(input instanceof HTMLInputElement)) return;
+    const key = managerSelfFlexKey(input.dataset.day);
+    const slot = state.managerSelfFlexTimeByKey[key] || { start: "", end: "" };
+    const text = input.parentElement?.querySelector(".manager-self-flex-text");
+    if (text instanceof HTMLElement) {
+      text.textContent = slot.start && slot.end ? `${slot.start}-${slot.end}` : "--:---";
+    }
+  });
+}
+
+function renderManagerSelfFlexEditor() {
+  const wrap = $("#manager-self-flex-editor-wrap");
+  const list = $("#manager-self-flex-editor-list");
+  const openButton = $("#btn-open-manager-self-flex-editor");
+  const backdrop = $("#manager-self-flex-modal-backdrop");
+  if (!wrap || !list) return;
+
+  const keys = selectedManagerSelfFlexKeys();
+  if (!keys.length) {
+    state.managerSelfFlexEditorDismissed = false;
+    wrap.classList.add("hidden");
+    backdrop?.classList.add("hidden");
+    openButton?.classList.add("hidden");
+    list.innerHTML = "";
+    updateManagerSelfShiftSummary();
+    return;
+  }
+
+  const shouldHidePanel = state.managerSelfFlexEditorDismissed;
+  wrap.classList.toggle("hidden", shouldHidePanel);
+  backdrop?.classList.toggle("hidden", shouldHidePanel);
+  openButton?.classList.toggle("hidden", !shouldHidePanel);
+
+  const dayMetaByDay = new Map(weekDaysMeta().map((meta) => [meta.day, meta]));
+  list.innerHTML = "";
+  keys.forEach((key) => {
+    const slot = state.managerSelfFlexTimeByKey[key] || { start: "", end: "" };
+    const { dayOfWeek } = parseManagerSelfFlexKey(key);
+    const dayMeta = dayMetaByDay.get(dayOfWeek);
+    const dayLabel = dayMeta ? `${dayMeta.label} ${dayMeta.dateLabel ? `(${dayMeta.dateLabel})` : ""}` : `Ngày ${dayOfWeek}`;
+
+    const row = document.createElement("div");
+    row.className = "list-item flex-editor-row";
+    row.innerHTML = `
+      <span><strong>${escapeHtml(dayLabel)}</strong><br /><small>Ca linh hoạt của quản lý</small></span>
+      <div class="row compact flex-editor-controls">
+        <label>Giờ vào <input type="time" data-manager-flex-key="${key}" data-manager-flex-field="start" value="${escapeHtml(slot.start || "")}" /></label>
+        <label>Giờ ra <input type="time" data-manager-flex-key="${key}" data-manager-flex-field="end" value="${escapeHtml(slot.end || "")}" /></label>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+
+  if (list.dataset.bound !== "true") {
+    list.dataset.bound = "true";
+    list.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      const key = target.dataset.managerFlexKey;
+      const field = target.dataset.managerFlexField;
+      if (!key || !field) return;
+      const current = state.managerSelfFlexTimeByKey[key] || { start: "", end: "" };
+      current[field] = target.value || "";
+      state.managerSelfFlexTimeByKey[key] = current;
+      refreshManagerSelfFlexCells();
+      updateManagerSelfShiftSummary();
+    });
+  }
+
+  refreshManagerSelfFlexCells();
+  updateManagerSelfShiftSummary();
+}
+
+function updateManagerScheduleSummary() {
+  const prefNode = $("#manager-preferences-summary");
+  const assignedNode = $("#manager-assigned-summary");
+
+  if (prefNode) {
+    const selected = document.querySelectorAll("#manager-preferences input:checked").length;
+    const all = document.querySelectorAll("#manager-preferences input[type='checkbox']").length;
+    prefNode.innerHTML = `
+      <span class="summary-pill">Đã phân công: <strong>${selected}/${all}</strong> lựa chọn</span>
+    `;
+  }
+
+  if (assignedNode) {
+    const inRange = document.querySelectorAll("#manager-schedule td.is-in-range").length;
+    const outRange = document.querySelectorAll("#manager-schedule td.is-out-range").length;
+    const empty = document.querySelectorAll("#manager-schedule td.is-empty").length;
+    assignedNode.innerHTML = `
+      <span class="summary-pill">Đủ định mức: <strong>${inRange}</strong></span>
+      <span class="summary-pill ${outRange > 0 ? "warn" : ""}">Lệch định mức: <strong>${outRange}</strong></span>
+      <span class="summary-pill">Ô trống: <strong>${empty}</strong></span>
+    `;
+  }
+}
+
+function renderEmployeeFlexEditor() {
+  const wrap = $("#employee-flex-editor-wrap");
+  const list = $("#employee-flex-editor-list");
+  const openButton = $("#btn-open-flex-editor");
+  const backdrop = $("#employee-flex-modal-backdrop");
+  if (!wrap || !list) return;
+
+  const keys = selectedEmployeeFlexKeys();
+  if (!keys.length) {
+    state.employeeFlexEditorDismissed = false;
+    wrap.classList.add("hidden");
+    backdrop?.classList.add("hidden");
+    openButton?.classList.add("hidden");
+    list.innerHTML = "";
+    updateEmployeeShiftSummary();
+    return;
+  }
+
+  const shouldHidePanel = state.employeeFlexEditorDismissed;
+  wrap.classList.toggle("hidden", shouldHidePanel);
+  backdrop?.classList.toggle("hidden", shouldHidePanel);
+  openButton?.classList.toggle("hidden", !shouldHidePanel);
+
+  const dayMetaByDay = new Map(weekDaysMeta().map((meta) => [meta.day, meta]));
+  const branchNameById = new Map((state.employeeBranches || []).map((branch) => [Number(branch.id), branch.name]));
+
+  list.innerHTML = "";
+  keys.forEach((key) => {
+    const slot = state.employeeFlexTimeByKey[key] || { start: "", end: "" };
+    const { branchId, dayOfWeek } = parseEmployeeFlexKey(key);
+    const dayMeta = dayMetaByDay.get(dayOfWeek);
+    const branchName = branchNameById.get(branchId) || `Chi nhánh ${branchId}`;
+    const dayLabel = dayMeta ? `${dayMeta.label} ${dayMeta.dateLabel ? `(${dayMeta.dateLabel})` : ""}` : `Ngày ${dayOfWeek}`;
+
+    const row = document.createElement("div");
+    row.className = "list-item flex-editor-row";
+    row.innerHTML = `
+      <span><strong>${escapeHtml(branchName)}</strong><br /><small>${escapeHtml(dayLabel)}</small></span>
+      <div class="row compact flex-editor-controls">
+        <label>Giờ vào <input type="time" data-flex-key="${key}" data-flex-field="start" value="${escapeHtml(slot.start || "")}" /></label>
+        <label>Giờ ra <input type="time" data-flex-key="${key}" data-flex-field="end" value="${escapeHtml(slot.end || "")}" /></label>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+
+  if (list.dataset.bound !== "true") {
+    list.dataset.bound = "true";
+    list.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      const key = target.dataset.flexKey;
+      const field = target.dataset.flexField;
+      if (!key || !field) return;
+      const current = state.employeeFlexTimeByKey[key] || { start: "", end: "" };
+      current[field] = target.value || "";
+      state.employeeFlexTimeByKey[key] = current;
+      updateEmployeeShiftSummary();
+    });
+  }
+
+  updateEmployeeShiftSummary();
+}
+
+async function loadEmployeeRegistrationGroups() {
+  const items = await api(`/api/employee/registration-groups?week_start=${encodeURIComponent(currentWeek())}`);
+  const branchFilter = Number($("#employee-group-branch")?.value || 0);
+  const filtered = branchFilter ? items.filter((item) => Number(item.branch_id) === branchFilter) : items;
+  const list = $("#employee-registration-groups-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.className = "list-item";
+    empty.innerHTML = "<span>Chưa có nhóm đăng ký cho tuần này.</span>";
+    list.appendChild(empty);
+    return;
+  }
+
+  filtered.forEach((item) => {
+    const row = document.createElement("div");
+    const count = Number(item.member_count || 0);
+    const max = item.max_members == null ? null : Number(item.max_members);
+    const isFull = !!max && count >= max;
+    row.className = `list-item registration-group-item ${isFull ? "is-full" : ""}`;
+    row.innerHTML = `
+      <span>
+        <strong>${escapeHtml(item.group_name)}</strong> (${escapeHtml(item.group_code)})<br />
+        <small>${escapeHtml(item.branch_name)} | ${groupCapacityText(item)}</small>
+      </span>
+      <button class="ghost" data-use-group-code="${escapeHtml(item.group_code)}">Dùng mã nhóm</button>
+    `;
+    list.appendChild(row);
+  });
+
+  list.querySelectorAll("button[data-use-group-code]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const code = button.dataset.useGroupCode || "";
+      $("#employee-group-code").value = code;
+      $("#employee-group-code-join").value = code;
+      $("#employee-registration-type").value = "group";
+      updateEmployeeRegistrationUiState();
+      showToast("Đã chọn mã nhóm để đăng ký ca");
+    });
+  });
+}
+
+async function joinEmployeeGroup() {
+  const branch_id = Number($("#employee-group-branch").value);
+  const group_code = $("#employee-group-code-join").value.trim();
+  if (!branch_id) throw new Error("Vui lòng chọn chi nhánh");
+  if (!group_code) throw new Error("Vui lòng nhập mã nhóm");
+
+  await api("/api/employee/registration-groups/join", {
+    method: "POST",
+    body: JSON.stringify({
+      week_start: currentWeek(),
+      branch_id,
+      group_code,
+    }),
+  });
+
+  $("#employee-group-code").value = group_code;
+  $("#employee-registration-type").value = "group";
+  updateEmployeeRegistrationUiState();
+  showToast("Đã tham gia nhóm");
+  await loadEmployeeRegistrationGroups();
+}
+
 async function loadEmployeeShifts() {
   const prefs = await api(`/api/employee/preferences?week_start=${encodeURIComponent(currentWeek())}`);
+
+  const prefMap = new Map();
+  state.employeeFlexTimeByKey = {};
+  state.employeeFlexEditorDismissed = false;
+  prefs.forEach((item) => {
+    expandDays(item.day_of_week).forEach((day) => {
+      const key = `${Number(item.branch_id)}|${item.shift_code}|${day}`;
+      prefMap.set(key, item);
+      if (item.shift_code === "FLEX") {
+        state.employeeFlexTimeByKey[key] = {
+          start: item.flexible_start_at || "",
+          end: item.flexible_end_at || "",
+        };
+      }
+    });
+  });
+  loadEmployeeFlexDraft();
+
+  if (prefs.length) {
+    const first = prefs[0];
+    if (first.registration_type) {
+      $("#employee-registration-type").value = first.registration_type;
+    }
+    if (first.group_code) {
+      $("#employee-group-code").value = first.group_code;
+      $("#employee-group-code-join").value = first.group_code;
+    }
+  }
+
   const checked = new Set(
     prefs.flatMap((x) =>
       expandDays(x.day_of_week).map((day) => `${Number(x.branch_id)}|${x.shift_code}|${day}`)
@@ -936,19 +1614,54 @@ async function loadEmployeeShifts() {
   });
 
   list.appendChild(board);
+  updateEmployeeRegistrationUiState();
+  renderEmployeeFlexEditor();
+  updateEmployeeShiftSummary();
 }
 
 async function saveEmployeeShifts() {
-  const selections = [...document.querySelectorAll("#employee-shift-grid input:checked")].map((el) => ({
-    branch_id: Number(el.dataset.branch),
-    shift_code: el.dataset.shift,
-    day_of_week: Number(el.dataset.day),
-  }));
+  const registrationType = $("#employee-registration-type").value;
+  const groupCode = $("#employee-group-code").value.trim().toUpperCase();
+
+  if (registrationType === "group" && !groupCode) {
+    throw new Error("Vui lòng nhập mã nhóm khi đăng ký theo nhóm");
+  }
+
+  const selections = [...document.querySelectorAll("#employee-shift-grid input:checked")].map((el) => {
+    const shiftCode = el.dataset.shift;
+    const key = employeeFlexKey(el.dataset.branch, el.dataset.day);
+    const flexSlot = state.employeeFlexTimeByKey[key] || { start: "", end: "" };
+    const payload = {
+      branch_id: Number(el.dataset.branch),
+      shift_code: shiftCode,
+      day_of_week: Number(el.dataset.day),
+      registration_type: registrationType,
+      group_code: registrationType === "group" ? groupCode : null,
+    };
+    if (shiftCode === "FLEX") {
+      payload.flexible_start_at = flexSlot.start || null;
+      payload.flexible_end_at = flexSlot.end || null;
+    }
+    return payload;
+  });
+
+  selections.forEach((item) => {
+    if (item.shift_code !== "FLEX") return;
+    if (!item.flexible_start_at || !item.flexible_end_at) {
+      throw new Error("Vui lòng nhập giờ vào/ra cho mọi ô Ca linh hoạt đã chọn");
+    }
+    if (item.flexible_end_at <= item.flexible_start_at) {
+      throw new Error("Giờ ra phải lớn hơn giờ vào ở Ca linh hoạt");
+    }
+  });
+
   await api("/api/employee/preferences", {
     method: "PUT",
     body: JSON.stringify({ week_start: currentWeek(), selections }),
   });
+  saveEmployeeFlexDraft();
   showToast("Đã lưu ca làm");
+  await loadEmployeeRegistrationGroups();
 }
 
 async function loadEmployeeAssignedSchedule() {
@@ -1005,8 +1718,16 @@ async function loadEmployeeAssignedSchedule() {
         const content = rows.length
           ? rows
               .map(
-                (item) =>
-                  `<span class="tt-pill assigned-pill"><strong>${item.branch_name}</strong><small>Xếp bởi: ${item.assigned_by_name}</small></span>`
+                (item) => {
+                  const modeLabel = item.registration_type === "group"
+                    ? `Nhóm: ${item.group_code || "-"}`
+                    : "Cá nhân";
+                  const flexLabel =
+                    item.shift_code === "FLEX" && item.flexible_start_at && item.flexible_end_at
+                      ? ` | Linh hoạt: ${item.flexible_start_at}-${item.flexible_end_at}`
+                      : "";
+                  return `<span class="tt-pill assigned-pill"><strong>${item.branch_name}</strong><small>Xếp bởi: ${item.assigned_by_name} | ${modeLabel}${flexLabel}</small></span>`;
+                }
               )
               .join("")
           : `<span class="tt-empty assigned-empty">Trống</span>`;
@@ -1053,9 +1774,22 @@ async function loadMyIssues() {
 
 async function loadManagerSelfShifts() {
   const prefs = await api(`/api/manager/self-preferences?week_start=${encodeURIComponent(currentWeek())}`);
+  state.managerSelfFlexTimeByKey = {};
+  state.managerSelfFlexEditorDismissed = false;
   const checked = new Set(
     prefs.flatMap((x) => expandDays(x.day_of_week).map((day) => `${x.shift_code}|${day}`))
   );
+  prefs.forEach((item) => {
+    if (item.shift_code !== "FLEX") return;
+    expandDays(item.day_of_week).forEach((day) => {
+      const key = managerSelfFlexKey(day);
+      state.managerSelfFlexTimeByKey[key] = {
+        start: item.flexible_start_at || "",
+        end: item.flexible_end_at || "",
+      };
+    });
+  });
+  loadManagerSelfFlexDraft();
   const root = $("#manager-self-shifts-list");
   root.innerHTML = "";
 
@@ -1065,7 +1799,7 @@ async function loadManagerSelfShifts() {
     <table class="week-table">
       <thead>
         <tr>
-          <th class="week-shift-col">Ca lam</th>
+          <th class="week-shift-col">Khung giờ</th>
           ${weekHeaderCellsHtml()}
         </tr>
       </thead>
@@ -1079,26 +1813,58 @@ async function loadManagerSelfShifts() {
     const cells = weekDaysMeta()
       .map((meta) => {
         const key = `${shift.code}|${meta.day}`;
-        return `<td><label class="tt-checkbox"><input type="checkbox" data-shift="${shift.code}" data-day="${meta.day}" ${checked.has(key) ? "checked" : ""} /> Chọn</label></td>`;
+        if (shift.code !== "FLEX") {
+          return `<td><label class="tt-checkbox"><input type="checkbox" data-shift="${shift.code}" data-day="${meta.day}" ${checked.has(key) ? "checked" : ""} /> Chọn</label></td>`;
+        }
+        const flexKey = managerSelfFlexKey(meta.day);
+        const slot = state.managerSelfFlexTimeByKey[flexKey] || { start: "", end: "" };
+        const labelTime = slot.start && slot.end ? `${slot.start}-${slot.end}` : "--:---";
+        return `<td><label class="tt-checkbox manager-self-flex-checkbox"><input type="checkbox" data-shift="${shift.code}" data-day="${meta.day}" ${checked.has(key) ? "checked" : ""} /> Chọn <small class="manager-self-flex-text">${escapeHtml(labelTime)}</small></label></td>`;
       })
       .join("");
-    row.innerHTML = `<th class="week-shift-col">${shiftText(shift.code)}</th>${cells}`;
+    row.innerHTML = `<th class="week-shift-col">${shiftRowHourLabel(shift.code)}</th>${cells}`;
     body.appendChild(row);
   });
 
   root.appendChild(board);
+  renderManagerSelfFlexEditor();
+  refreshManagerSelfFlexCells();
+  updateManagerSelfShiftSummary();
 }
 
 async function saveManagerSelfShifts() {
-  const selections = [...document.querySelectorAll("#manager-self-shifts-list input:checked")].map((el) => ({
-    shift_code: el.dataset.shift,
-    day_of_week: Number(el.dataset.day),
-  }));
+  const selections = [...document.querySelectorAll("#manager-self-shifts-list input:checked")].map((el) => {
+    const shiftCode = el.dataset.shift;
+    const day = Number(el.dataset.day);
+    const payload = {
+      shift_code: shiftCode,
+      day_of_week: day,
+    };
+    if (shiftCode === "FLEX") {
+      const key = managerSelfFlexKey(day);
+      const flexSlot = state.managerSelfFlexTimeByKey[key] || { start: "", end: "" };
+      payload.flexible_start_at = flexSlot.start || null;
+      payload.flexible_end_at = flexSlot.end || null;
+    }
+    return payload;
+  });
+
+  selections.forEach((item) => {
+    if (item.shift_code !== "FLEX") return;
+    if (!item.flexible_start_at || !item.flexible_end_at) {
+      throw new Error("Vui lòng nhập giờ vào/ra cho mọi ô FLEX đã chọn của quản lý");
+    }
+    if (item.flexible_end_at <= item.flexible_start_at) {
+      throw new Error("Giờ ra phải lớn hơn giờ vào ở FLEX của quản lý");
+    }
+  });
+
   await api("/api/manager/self-preferences", {
     method: "PUT",
     body: JSON.stringify({ week_start: currentWeek(), selections }),
   });
   showToast("Đã lưu ca của quản lý");
+  await loadManagerSelfShifts();
 }
 
 function groupByEmployee(records) {
@@ -1112,6 +1878,78 @@ function groupByEmployee(records) {
   return [...map.values()];
 }
 
+function registrationMetaText(item) {
+  const mode = item.registration_type === "group"
+    ? `Nhóm ${item.group_code || "-"}`
+    : "Cá nhân";
+  const flex = item.shift_code === "FLEX" && item.flexible_start_at && item.flexible_end_at
+    ? ` | Linh hoạt ${item.flexible_start_at}-${item.flexible_end_at}`
+    : "";
+  return `${mode}${flex}`;
+}
+
+async function loadManagerRegistrationGroups() {
+  const list = $("#manager-registration-groups-list");
+  if (!list) return;
+  const rows = await api(`/api/manager/registration-groups?week_start=${encodeURIComponent(currentWeek())}`);
+  list.innerHTML = "";
+
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "list-item";
+    empty.innerHTML = "<span>Chưa có nhóm nào trong tuần này.</span>";
+    list.appendChild(empty);
+    return;
+  }
+
+  rows.forEach((item) => {
+    const row = document.createElement("div");
+    const count = Number(item.member_count || 0);
+    const max = item.max_members == null ? null : Number(item.max_members);
+    const isFull = !!max && count >= max;
+    row.className = `list-item registration-group-item ${isFull ? "is-full" : ""}`;
+    row.innerHTML = `
+      <span>
+        <strong>${escapeHtml(item.group_name)}</strong> (${escapeHtml(item.group_code)})<br />
+        <small>${groupCapacityText(item)}</small>
+      </span>
+      <span class="muted">${escapeHtml(item.note || "")}</span>
+    `;
+    list.appendChild(row);
+  });
+}
+
+async function createManagerRegistrationGroup() {
+  const group_name = $("#manager-group-name").value.trim();
+  const group_code = $("#manager-group-code").value.trim().toUpperCase();
+  const note = $("#manager-group-note").value.trim();
+  const max_members = Number($("#manager-group-max-members").value || 0);
+
+  if (!group_name) throw new Error("Vui lòng nhập tên nhóm");
+  if (!Number.isInteger(max_members) || max_members < 1) {
+    throw new Error("Số lượng thành viên phải từ 1 trở lên");
+  }
+
+  const payload = await api("/api/manager/registration-groups", {
+    method: "POST",
+    body: JSON.stringify({
+      week_start: currentWeek(),
+      group_name,
+      group_code: group_code || null,
+      max_members,
+      note: note || null,
+    }),
+  });
+
+  $("#manager-group-name").value = "";
+  $("#manager-group-note").value = "";
+  if (!group_code) {
+    $("#manager-group-code").value = payload.group_code || "";
+  }
+  showToast("Đã tạo nhóm đăng ký ca");
+  await loadManagerRegistrationGroups();
+}
+
 async function loadManagerSchedule() {
   const [prefs, schedule, employeePayload] = await Promise.all([
     api(`/api/manager/preferences?week_start=${encodeURIComponent(currentWeek())}`),
@@ -1119,12 +1957,16 @@ async function loadManagerSchedule() {
     api("/api/manager/employees"),
   ]);
 
-  const fallbackEmployees = (employeePayload?.employees || [])
-    .filter((employee) => employee.is_active)
-    .map((employee) => ({
-      employee_id: Number(employee.id),
-      employee_name: employee.display_name,
-    }));
+  const _ = employeePayload; // keep payload request for future UI extensions
+
+  ensureManagerDayFilterOptions();
+  const selectedDay = Number($("#manager-schedule-day-filter")?.value || managerScheduleUiState.selectedDay || 0);
+  const assignedSelectedDay = Number($("#manager-assigned-day-filter")?.value || managerScheduleUiState.assignedSelectedDay || 0);
+  managerScheduleUiState.selectedDay = selectedDay;
+  managerScheduleUiState.assignedSelectedDay = assignedSelectedDay;
+
+  const prefDays = weekDaysMeta().filter((meta) => selectedDay === 0 || meta.day === selectedDay);
+  const assignedDays = weekDaysMeta().filter((meta) => assignedSelectedDay === 0 || meta.day === assignedSelectedDay);
 
   await loadManagerStaffingRules();
   const assigned = new Set(
@@ -1138,12 +1980,12 @@ async function loadManagerSchedule() {
 
   const prefBoard = document.createElement("div");
   prefBoard.className = "week-table-wrap compact-week-table-wrap";
-  const headerCells = weekHeaderCellsHtml();
+  const headerCells = weekHeaderCellsHtmlFor(prefDays);
   prefBoard.innerHTML = `
     <table class="week-table compact-week-table">
       <thead>
         <tr>
-          <th class="week-shift-col">Ca lam</th>
+          <th class="week-shift-col">Khung giờ</th>
           ${headerCells}
         </tr>
       </thead>
@@ -1152,25 +1994,32 @@ async function loadManagerSchedule() {
   `;
   const prefBody = prefBoard.querySelector("#manager-pref-week-body");
 
-  state.shifts.forEach((shift, shiftIndex) => {
+  const smallShifts = state.shifts.filter((shift) => SMALL_SHIFT_CODES.includes(shift.code));
+
+  smallShifts.forEach((shift, shiftIndex) => {
     const row = document.createElement("tr");
     row.className = `shift-row shift-idx-${shiftIndex % 6}`;
-    const cells = weekDaysMeta()
+    const cells = prefDays
       .map((meta) => {
-        const prefRows = prefs.filter(
-          (p) => p.shift_code === shift.code && expandDays(p.day_of_week).includes(meta.day)
-        );
-        const rows = prefRows.length ? prefRows : fallbackEmployees;
+        const rows = collectAnchoredRows(prefs, shift.code, meta.day);
         const hasAssignableRows = rows.length > 0;
         const cellClass = hasAssignableRows ? "has-data" : "is-empty";
         let content = `<span class="tt-empty">Không có nhân sự để phân công</span>`;
         if (hasAssignableRows) {
           content = rows
             .map((p) => {
-              const shiftCode = p.shift_code || shift.code;
-              const key = `${p.employee_id}|${shiftCode}|${meta.day}`;
+              const key = `${p.employee_id}|${p.shift_code}|${meta.day}`;
               const checked = assigned.has(key) ? "checked" : "";
-              return `<label class="tt-checkbox"><input type="checkbox" data-eid="${p.employee_id}" data-shift="${shiftCode}" data-day="${meta.day}" ${checked} /> ${p.employee_name}</label>`;
+              const initials = escapeHtml(employeeInitials(p.employee_name));
+              const isLargeOrFlex = p.shift_code === "FLEX" || p.shift_code === "M1" || p.shift_code === "M2";
+              const timeText = isLargeOrFlex ? escapeHtml(shiftDisplayTime(p)) : "";
+              const tag =
+                p.shift_code === "FLEX"
+                  ? ` <small class="flex-registered-time">(${p.flexible_start_at || "--:--"}-${p.flexible_end_at || "--:--"})</small>`
+                  : p.shift_code === "M1" || p.shift_code === "M2"
+                    ? ` <small>(${p.shift_code})</small>`
+                    : "";
+              return `<label class="tt-checkbox"><input type="checkbox" data-eid="${p.employee_id}" data-shift="${p.shift_code}" data-day="${meta.day}" ${checked} /><span class="worker-pref-chip"><span class="worker-name-icon">${initials}</span><span class="worker-shift-meta"><span class="worker-name-text">${escapeHtml(p.employee_name || "-")}</span>${timeText ? `<small>${timeText}</small>` : ""}</span></span>${tag}</label>`;
             })
             .join("");
         }
@@ -1178,7 +2027,7 @@ async function loadManagerSchedule() {
       })
       .join("");
 
-    row.innerHTML = `<th class="week-shift-col">${shiftText(shift.code)}</th>${cells}`;
+    row.innerHTML = `<th class="week-shift-col">${shiftRowHourLabel(shift.code)}</th>${cells}`;
     prefBody.appendChild(row);
   });
   prefBox.appendChild(prefBoard);
@@ -1188,12 +2037,13 @@ async function loadManagerSchedule() {
 
   const scheduleBoard = document.createElement("div");
   scheduleBoard.className = "week-table-wrap compact-week-table-wrap";
+  const assignedHeaderCells = weekHeaderCellsHtmlFor(assignedDays);
   scheduleBoard.innerHTML = `
     <table class="week-table compact-week-table">
       <thead>
         <tr>
-          <th class="week-shift-col">Ca lam</th>
-          ${headerCells}
+          <th class="week-shift-col">Khung giờ</th>
+          ${assignedHeaderCells}
         </tr>
       </thead>
       <tbody id="manager-schedule-week-body"></tbody>
@@ -1201,30 +2051,30 @@ async function loadManagerSchedule() {
   `;
   const scheduleBody = scheduleBoard.querySelector("#manager-schedule-week-body");
 
-  state.shifts.forEach((shift, shiftIndex) => {
+  smallShifts.forEach((shift, shiftIndex) => {
     const row = document.createElement("tr");
     row.className = `shift-row shift-idx-${shiftIndex % 6}`;
-    const cells = weekDaysMeta()
+    const cells = assignedDays
       .map((meta) => {
-        const rows = schedule.filter(
-          (item) => item.shift_code === shift.code && expandDays(item.day_of_week).includes(meta.day)
-        );
+        const rows = collectAnchoredRows(schedule, shift.code, meta.day);
         const rule = managerStaffingRules.get(shift.code) || { min_staff: 3, max_staff: 4 };
         const count = rows.length;
         const outOfRange = count > 0 && (count < Number(rule.min_staff) || count > Number(rule.max_staff));
         const cellClass = count === 0 ? "is-empty" : outOfRange ? "is-out-range" : "is-in-range";
+        const groupedRows = groupScheduleRowsForDisplay(rows);
         const content = rows.length
-          ? rows.map((item) => `<span class="tt-pill">${item.employee_name}</span>`).join("")
+          ? groupedRows.map((items) => compactGroupedShiftTag(items)).join("")
           : `<span class="tt-empty">Trống</span>`;
-        return `<td class="day-cell day-${meta.day} ${cellClass}"><div class="tt-content">${content}</div></td>`;
+        return `<td class="day-cell day-${meta.day} ${cellClass}"><div class="tt-content">${content}</div><small class="muted">${count} người</small></td>`;
       })
       .join("");
 
-    row.innerHTML = `<th class="week-shift-col">${shiftText(shift.code)}</th>${cells}`;
+    row.innerHTML = `<th class="week-shift-col">${shiftRowHourLabel(shift.code)}</th>${cells}`;
     scheduleBody.appendChild(row);
   });
   scheduleBox.appendChild(scheduleBoard);
   initManagerScheduleTabs();
+  updateManagerScheduleSummary();
 }
 
 async function saveManagerSchedule() {
@@ -1585,8 +2435,7 @@ function prettifyLegacyBranchAuditDetail(action, rawDetails) {
       const oldLocation = updated[2] || "chua cap nhat";
       const newName = updated[3] || "chua cap nhat";
       const newLocation = updated[4] || "chua cap nhat";
-      const newIp = updated[5] || "chua cau hinh";
-      return `Cap nhat chi nhanh "${newName}": doi ten tu "${oldName}" sang "${newName}". Cap nhat dia diem tu "${oldLocation}" sang "${newLocation}". IP router hien tai: ${newIp}.`;
+      return `Cap nhat chi nhanh "${newName}": doi ten tu "${oldName}" sang "${newName}". Cap nhat dia diem tu "${oldLocation}" sang "${newLocation}".`;
     }
   }
 
@@ -1652,7 +2501,6 @@ async function loadCeoBranches() {
         <div class="ceo-branch-view">
           <strong>${branch.name}</strong><br />
           <small>Địa điểm: ${branch.location || "-"}</small><br />
-          <small>IP router: ${branch.network_ip || "-"}</small><br />
           <small>Quản lý: ${branch.manager_count} | Nhân viên: ${branch.employee_count}</small>
         </div>
         <div class="ceo-branch-edit hidden">
@@ -1662,9 +2510,6 @@ async function loadCeoBranches() {
             </label>
             <label>Địa điểm
               <input type="text" data-branch-location-input value="${escapeHtml(branch.location || "")}" />
-            </label>
-            <label>IP router
-              <input type="text" data-branch-ip-input value="${escapeHtml(branch.network_ip || "")}" placeholder="VD: 203.113.10.20" />
             </label>
           </div>
           <small class="muted">Có thể cập nhật trực tiếp để sửa sai thông tin chi nhánh.</small>
@@ -1722,18 +2567,13 @@ async function loadCeoBranches() {
         const branchId = Number(target.dataset.branchSave);
         const name = String(row.querySelector("input[data-branch-name-input]")?.value || "").trim();
         const location = String(row.querySelector("input[data-branch-location-input]")?.value || "").trim();
-        const network_ip = String(row.querySelector("input[data-branch-ip-input]")?.value || "").trim();
         if (!name) {
           showToast("Tên chi nhánh không được để trống", true);
           return;
         }
-        if (network_ip && !/^\d{1,3}(\.\d{1,3}){3}$/.test(network_ip)) {
-          showToast("IP router không hợp lệ", true);
-          return;
-        }
         await api(`/api/admin/branches/${branchId}`, {
           method: "PUT",
-          body: JSON.stringify({ name, location, network_ip }),
+          body: JSON.stringify({ name, location }),
         });
         showToast("Đã cập nhật chi nhánh");
         ceoBranchAuditState.branchId = branchId;
@@ -1945,14 +2785,12 @@ async function loadCeoUsers() {
 async function createBranchByCeo() {
   const name = $("#ceo-branch-new-name").value.trim();
   const location = $("#ceo-branch-new-location").value.trim();
-  const network_ip = $("#ceo-branch-new-network-ip").value.trim();
   await api("/api/admin/branches", {
     method: "POST",
-    body: JSON.stringify({ name, location, network_ip }),
+    body: JSON.stringify({ name, location }),
   });
   $("#ceo-branch-new-name").value = "";
   $("#ceo-branch-new-location").value = "";
-  $("#ceo-branch-new-network-ip").value = "";
   showToast("Da them chi nhanh moi");
   ceoBranchState.page = 1;
   ceoBranchAuditState.page = 1;
@@ -2125,7 +2963,88 @@ function attachEvents() {
     scanEmployeeOneTimeQr().catch((e) => showToast(e.message, true))
   );
   $("#btn-check-out").addEventListener("click", () => checkOutEmployee().catch((e) => showToast(e.message, true)));
+  $("#btn-confirm-attendance").addEventListener("click", () =>
+    confirmAttendanceEmployee().catch((e) => showToast(e.message, true))
+  );
   $("#btn-save-employee-shifts").addEventListener("click", () => saveEmployeeShifts().catch((e) => showToast(e.message, true)));
+  $("#employee-registration-type").addEventListener("change", updateEmployeeRegistrationUiState);
+  $("#btn-open-flex-editor").addEventListener("click", () => {
+    state.employeeFlexEditorDismissed = false;
+    renderEmployeeFlexEditor();
+  });
+  $("#btn-save-flex-hours-draft").addEventListener("click", () => {
+    saveEmployeeFlexDraft();
+    showToast("Đã lưu giờ FLEX tạm");
+  });
+  $("#btn-close-flex-editor").addEventListener("click", () => {
+    state.employeeFlexEditorDismissed = true;
+    renderEmployeeFlexEditor();
+  });
+  $("#employee-flex-modal-backdrop").addEventListener("click", () => {
+    state.employeeFlexEditorDismissed = true;
+    renderEmployeeFlexEditor();
+  });
+  $("#employee-shift-grid").addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.matches("input[type='checkbox'][data-shift]")) {
+      if (target.dataset.shift === "FLEX" && target.checked) {
+        state.employeeFlexEditorDismissed = false;
+      }
+      renderEmployeeFlexEditor();
+      updateEmployeeShiftSummary();
+    }
+  });
+  $("#manager-self-shifts-list").addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.matches("input[type='checkbox'][data-shift]")) {
+      if (target.dataset.shift === "FLEX" && target.checked) {
+        state.managerSelfFlexEditorDismissed = false;
+      }
+      renderManagerSelfFlexEditor();
+      updateManagerSelfShiftSummary();
+    }
+  });
+  $("#btn-open-manager-self-flex-editor").addEventListener("click", () => {
+    state.managerSelfFlexEditorDismissed = false;
+    renderManagerSelfFlexEditor();
+  });
+  $("#btn-save-manager-flex-hours-draft").addEventListener("click", () => {
+    saveManagerSelfFlexDraft();
+    showToast("Đã lưu giờ FLEX tạm của quản lý");
+  });
+  $("#btn-close-manager-self-flex-editor").addEventListener("click", () => {
+    state.managerSelfFlexEditorDismissed = true;
+    renderManagerSelfFlexEditor();
+  });
+  $("#manager-self-flex-modal-backdrop").addEventListener("click", () => {
+    state.managerSelfFlexEditorDismissed = true;
+    renderManagerSelfFlexEditor();
+  });
+  $("#manager-preferences").addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.matches("input[type='checkbox'][data-eid]")) {
+      updateManagerScheduleSummary();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("#employee-flex-editor-wrap")?.classList.contains("hidden")) {
+      state.employeeFlexEditorDismissed = true;
+      renderEmployeeFlexEditor();
+    }
+    if (event.key === "Escape" && !$("#manager-self-flex-editor-wrap")?.classList.contains("hidden")) {
+      state.managerSelfFlexEditorDismissed = true;
+      renderManagerSelfFlexEditor();
+    }
+  });
+  $("#btn-employee-join-group").addEventListener("click", () =>
+    joinEmployeeGroup().catch((e) => showToast(e.message, true))
+  );
+  $("#employee-group-branch").addEventListener("change", () =>
+    loadEmployeeRegistrationGroups().catch((e) => showToast(e.message, true))
+  );
   $("#btn-submit-employee-issue").addEventListener("click", () => submitIssue().catch((e) => showToast(e.message, true)));
   $("#employee-assigned-branch-filter").addEventListener("change", () =>
     loadEmployeeAssignedSchedule().catch((e) => showToast(e.message, true))
@@ -2135,17 +3054,31 @@ function attachEvents() {
   );
 
   $("#btn-manager-check-in").addEventListener("click", () => checkInManager().catch((e) => showToast(e.message, true)));
+  $("#btn-manager-confirm-attendance").addEventListener("click", () =>
+    confirmAttendanceManager().catch((e) => showToast(e.message, true))
+  );
   $("#btn-manager-check-out").addEventListener("click", () => checkOutManager().catch((e) => showToast(e.message, true)));
   $("#btn-manager-generate-one-time-qr").addEventListener("click", () =>
     generateManagerOneTimeQr().catch((e) => showToast(e.message, true))
   );
   $("#btn-save-manager-self-shifts").addEventListener("click", () => saveManagerSelfShifts().catch((e) => showToast(e.message, true)));
+  $("#manager-schedule-day-filter").addEventListener("change", (event) => {
+    managerScheduleUiState.selectedDay = Number(event.target.value || 0);
+    loadManagerSchedule().catch((e) => showToast(e.message, true));
+  });
+  $("#manager-assigned-day-filter").addEventListener("change", (event) => {
+    managerScheduleUiState.assignedSelectedDay = Number(event.target.value || 0);
+    loadManagerSchedule().catch((e) => showToast(e.message, true));
+  });
   const managerScheduleSaveHandler = () =>
     saveManagerSchedule().catch((e) => showToast(e.message, true));
   $("#btn-save-manager-schedule").addEventListener("click", managerScheduleSaveHandler);
   $("#btn-save-manager-schedule-inline").addEventListener("click", managerScheduleSaveHandler);
   $("#btn-save-manager-staffing-rules").addEventListener("click", () =>
     saveManagerStaffingRules().catch((e) => showToast(e.message, true))
+  );
+  $("#btn-manager-create-group").addEventListener("click", () =>
+    createManagerRegistrationGroup().catch((e) => showToast(e.message, true))
   );
   $("#btn-create-employee").addEventListener("click", () => createEmployee().catch((e) => showToast(e.message, true)));
   $("#btn-manager-employee-search").addEventListener("click", () => {
@@ -2247,6 +3180,7 @@ function attachEvents() {
   });
 
   window.addEventListener("hashchange", () => renderRoute().catch((e) => showToast(e.message, true)));
+  window.addEventListener("resize", scheduleApplySidebarState);
 }
 
 async function bootstrap() {
@@ -2278,6 +3212,41 @@ function registerServiceWorker() {
   });
 }
 
+function initPwaUiMode() {
+  const inStandaloneMode =
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia("(display-mode: fullscreen)").matches ||
+    window.navigator.standalone === true;
+
+  document.body.classList.toggle("pwa-mode", inStandaloneMode);
+
+  window.matchMedia("(display-mode: standalone)").addEventListener?.("change", (event) => {
+    document.body.classList.toggle("pwa-mode", event.matches);
+  });
+}
+
+// ===== COMPACT MODE TOGGLE =====
+function initCompactMode() {
+  const isCompactMode = localStorage.getItem("wm_compact_mode") === "1";
+  if (isCompactMode) {
+    document.body.classList.add("compact-mode");
+  }
+
+  const btn = $("#btn-compact-mode");
+  if (!btn) return;
+
+  btn.addEventListener("click", () => {
+    document.body.classList.toggle("compact-mode");
+    const isNowCompact = document.body.classList.contains("compact-mode");
+    localStorage.setItem("wm_compact_mode", isNowCompact ? "1" : "0");
+    btn.title = isNowCompact ? "Tắt chế độ tối giản" : "Bật chế độ tối giản";
+  });
+
+  btn.title = isCompactMode ? "Tắt chế độ tối giản" : "Bật chế độ tối giản";
+}
+
 attachEvents();
+initCompactMode();
+initPwaUiMode();
 registerServiceWorker();
 bootstrap().catch((e) => showToast(e.message, true));

@@ -218,9 +218,17 @@ def get_conn(*, autocommit=False):
         pg_conn = psycopg.connect(**connect_kwargs)
         return _PgConnAdapter(pg_conn)
 
-    conn = sqlite3.connect(DB_PATH)
+    # Use a longer wait and WAL to reduce transient "database is locked" errors
+    # when multiple requests hit SQLite close together.
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        # Ignore if the database file cannot switch journal mode in this environment.
+        pass
     return conn
 
 
@@ -276,6 +284,10 @@ def _init_db_inner():
             branch_id INTEGER NOT NULL,
             shift_code TEXT NOT NULL,
             day_of_week INTEGER NOT NULL DEFAULT 0,
+            registration_type TEXT NOT NULL DEFAULT 'individual' CHECK (registration_type IN ('individual', 'group')),
+            group_code TEXT,
+            flexible_start_at TEXT,
+            flexible_end_at TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
@@ -288,6 +300,10 @@ def _init_db_inner():
             employee_id INTEGER NOT NULL,
             shift_code TEXT NOT NULL,
             day_of_week INTEGER NOT NULL DEFAULT 0,
+            registration_type TEXT NOT NULL DEFAULT 'individual' CHECK (registration_type IN ('individual', 'group')),
+            group_code TEXT,
+            flexible_start_at TEXT,
+            flexible_end_at TEXT,
             assigned_by INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
@@ -319,12 +335,51 @@ def _init_db_inner():
             employee_id INTEGER NOT NULL,
             branch_id INTEGER,
             check_in_at TEXT NOT NULL,
+            confirmed_at TEXT,
             check_out_at TEXT,
             minutes_worked INTEGER,
             note TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS attendance_confirm_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attendance_log_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            branch_id INTEGER,
+            confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            source TEXT NOT NULL DEFAULT 'employee_confirm',
+            note TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (attendance_log_id) REFERENCES attendance_logs(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS shift_registration_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_code TEXT NOT NULL,
+            group_name TEXT NOT NULL,
+            week_start TEXT NOT NULL,
+            branch_id INTEGER NOT NULL,
+            max_members INTEGER,
+            created_by_employee_id INTEGER NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
+            FOREIGN KEY (created_by_employee_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE (week_start, branch_id, group_code)
+        );
+
+        CREATE TABLE IF NOT EXISTS shift_registration_group_members (
+            group_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (group_id, employee_id),
+            FOREIGN KEY (group_id) REFERENCES shift_registration_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS attendance_employee_codes (
@@ -435,14 +490,50 @@ def _init_db_inner():
         CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_checkin
         ON attendance_logs(employee_id, check_in_at);
 
+        CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_confirmed
+        ON attendance_logs(employee_id, confirmed_at, check_out_at);
+
+        CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_open
+        ON attendance_logs(employee_id, check_out_at, id);
+
+        CREATE INDEX IF NOT EXISTS idx_attendance_logs_branch_checkin
+        ON attendance_logs(branch_id, check_in_at);
+
         CREATE INDEX IF NOT EXISTS idx_attendance_employee_codes_employee_branch
         ON attendance_employee_codes(employee_id, branch_id, expires_at);
+
+        CREATE INDEX IF NOT EXISTS idx_attendance_confirm_logs_attendance
+        ON attendance_confirm_logs(attendance_log_id, confirmed_at);
+
+        CREATE INDEX IF NOT EXISTS idx_attendance_confirm_logs_employee
+        ON attendance_confirm_logs(employee_id, confirmed_at);
 
         CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_branch_code
         ON attendance_qr_one_time_codes(branch_id, one_time_code, expires_at);
 
+        CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_validate
+        ON attendance_qr_one_time_codes(branch_id, qr_token, one_time_code, consumed_at, expires_at, id);
+
+        CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_expiry
+        ON attendance_qr_one_time_codes(expires_at);
+
+        CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_consumed
+        ON attendance_qr_one_time_codes(consumed_at);
+
         CREATE INDEX IF NOT EXISTS idx_shift_attendance_marks_branch_week_day
         ON shift_attendance_marks(branch_id, week_start, day_of_week, shift_code, status);
+
+        CREATE INDEX IF NOT EXISTS idx_shift_registration_groups_week_branch
+        ON shift_registration_groups(week_start, branch_id, group_code);
+
+        CREATE INDEX IF NOT EXISTS idx_shift_registration_groups_creator
+        ON shift_registration_groups(created_by_employee_id, week_start);
+
+        CREATE INDEX IF NOT EXISTS idx_shift_registration_group_members_employee
+        ON shift_registration_group_members(employee_id, group_id);
+
+        CREATE INDEX IF NOT EXISTS idx_shift_attendance_marks_employee_week
+        ON shift_attendance_marks(employee_id, week_start, day_of_week, shift_code);
 
         CREATE INDEX IF NOT EXISTS idx_issue_reports_branch_status
         ON issue_reports(branch_id, status);
@@ -458,6 +549,15 @@ def _init_db_inner():
 
         CREATE INDEX IF NOT EXISTS idx_branch_shift_requirements_branch
         ON branch_shift_requirements(branch_id);
+
+        CREATE INDEX IF NOT EXISTS idx_weekly_schedule_employee_branch_week_day
+        ON weekly_schedule(employee_id, branch_id, week_start, day_of_week, shift_code);
+
+        CREATE INDEX IF NOT EXISTS idx_shift_preferences_employee_week_branch_shift_day
+        ON shift_preferences(employee_id, week_start, branch_id, shift_code, day_of_week);
+
+        CREATE INDEX IF NOT EXISTS idx_shift_preferences_week_branch_group
+        ON shift_preferences(week_start, branch_id, registration_type, group_code);
         """
 
     if IS_POSTGRES:
@@ -475,7 +575,12 @@ def _init_db_inner():
 """,
             "",
         )
-        cur.executescript(sqlite_schema_sql)
+        try:
+            cur.executescript(sqlite_schema_sql)
+        except sqlite3.DatabaseError:
+            # Old SQLite files may not yet have newly added columns referenced by indexes.
+            # Migrations below will add missing columns/tables first, then recreate indexes safely.
+            pass
         _run_migrations(conn)
 
     seed_data(conn)
@@ -561,6 +666,14 @@ def _run_migrations(conn):
             """
         )
         cur.execute("DELETE FROM shift_preferences WHERE branch_id IS NULL")
+    if not _table_has_column(conn, "shift_preferences", "registration_type"):
+        cur.execute("ALTER TABLE shift_preferences ADD COLUMN registration_type TEXT NOT NULL DEFAULT 'individual'")
+    if not _table_has_column(conn, "shift_preferences", "group_code"):
+        cur.execute("ALTER TABLE shift_preferences ADD COLUMN group_code TEXT")
+    if not _table_has_column(conn, "shift_preferences", "flexible_start_at"):
+        cur.execute("ALTER TABLE shift_preferences ADD COLUMN flexible_start_at TEXT")
+    if not _table_has_column(conn, "shift_preferences", "flexible_end_at"):
+        cur.execute("ALTER TABLE shift_preferences ADD COLUMN flexible_end_at TEXT")
     if not _table_has_column(conn, "weekly_schedule", "day_of_week"):
         cur.execute("ALTER TABLE weekly_schedule ADD COLUMN day_of_week INTEGER NOT NULL DEFAULT 0")
     if not _table_has_column(conn, "weekly_schedule", "branch_id"):
@@ -584,6 +697,14 @@ def _run_migrations(conn):
             """
         )
         cur.execute("DELETE FROM weekly_schedule WHERE branch_id IS NULL")
+    if not _table_has_column(conn, "weekly_schedule", "registration_type"):
+        cur.execute("ALTER TABLE weekly_schedule ADD COLUMN registration_type TEXT NOT NULL DEFAULT 'individual'")
+    if not _table_has_column(conn, "weekly_schedule", "group_code"):
+        cur.execute("ALTER TABLE weekly_schedule ADD COLUMN group_code TEXT")
+    if not _table_has_column(conn, "weekly_schedule", "flexible_start_at"):
+        cur.execute("ALTER TABLE weekly_schedule ADD COLUMN flexible_start_at TEXT")
+    if not _table_has_column(conn, "weekly_schedule", "flexible_end_at"):
+        cur.execute("ALTER TABLE weekly_schedule ADD COLUMN flexible_end_at TEXT")
 
     cur.execute(
         """
@@ -605,6 +726,7 @@ def _run_migrations(conn):
             employee_id INTEGER NOT NULL,
             branch_id INTEGER,
             check_in_at TEXT NOT NULL,
+            confirmed_at TEXT,
             check_out_at TEXT,
             minutes_worked INTEGER,
             note TEXT,
@@ -614,6 +736,8 @@ def _run_migrations(conn):
         )
         """
     )
+    if not _table_has_column(conn, "attendance_logs", "confirmed_at"):
+        cur.execute("ALTER TABLE attendance_logs ADD COLUMN confirmed_at TEXT")
 
     cur.execute(
         """
@@ -648,6 +772,58 @@ def _run_migrations(conn):
             FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
             FOREIGN KEY (generated_by_manager_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (consumed_by_employee_id) REFERENCES users(id) ON DELETE SET NULL
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attendance_confirm_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attendance_log_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            branch_id INTEGER,
+            confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            source TEXT NOT NULL DEFAULT 'employee_confirm',
+            note TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (attendance_log_id) REFERENCES attendance_logs(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shift_registration_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_code TEXT NOT NULL,
+            group_name TEXT NOT NULL,
+            week_start TEXT NOT NULL,
+            branch_id INTEGER NOT NULL,
+            max_members INTEGER,
+            created_by_employee_id INTEGER NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
+            FOREIGN KEY (created_by_employee_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE (week_start, branch_id, group_code)
+        )
+        """
+    )
+    if not _table_has_column(conn, "shift_registration_groups", "max_members"):
+        cur.execute("ALTER TABLE shift_registration_groups ADD COLUMN max_members INTEGER")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shift_registration_group_members (
+            group_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (group_id, employee_id),
+            FOREIGN KEY (group_id) REFERENCES shift_registration_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE
         )
         """
     )
@@ -730,13 +906,49 @@ def _run_migrations(conn):
         "CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_checkin ON attendance_logs(employee_id, check_in_at)"
     )
     cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_confirmed ON attendance_logs(employee_id, confirmed_at, check_out_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_open ON attendance_logs(employee_id, check_out_at, id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_logs_branch_checkin ON attendance_logs(branch_id, check_in_at)"
+    )
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_attendance_employee_codes_employee_branch ON attendance_employee_codes(employee_id, branch_id, expires_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_confirm_logs_attendance ON attendance_confirm_logs(attendance_log_id, confirmed_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_confirm_logs_employee ON attendance_confirm_logs(employee_id, confirmed_at)"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_branch_code ON attendance_qr_one_time_codes(branch_id, one_time_code, expires_at)"
     )
     cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_validate ON attendance_qr_one_time_codes(branch_id, qr_token, one_time_code, consumed_at, expires_at, id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_expiry ON attendance_qr_one_time_codes(expires_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_qr_one_time_codes_consumed ON attendance_qr_one_time_codes(consumed_at)"
+    )
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_shift_attendance_marks_branch_week_day ON shift_attendance_marks(branch_id, week_start, day_of_week, shift_code, status)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shift_registration_groups_week_branch ON shift_registration_groups(week_start, branch_id, group_code)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shift_registration_groups_creator ON shift_registration_groups(created_by_employee_id, week_start)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shift_registration_group_members_employee ON shift_registration_group_members(employee_id, group_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shift_attendance_marks_employee_week ON shift_attendance_marks(employee_id, week_start, day_of_week, shift_code)"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_issue_reports_branch_status ON issue_reports(branch_id, status)"
@@ -764,6 +976,15 @@ def _run_migrations(conn):
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_branch_shift_requirements_branch ON branch_shift_requirements(branch_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_weekly_schedule_employee_branch_week_day ON weekly_schedule(employee_id, branch_id, week_start, day_of_week, shift_code)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shift_preferences_employee_week_branch_shift_day ON shift_preferences(employee_id, week_start, branch_id, shift_code, day_of_week)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shift_preferences_week_branch_group ON shift_preferences(week_start, branch_id, registration_type, group_code)"
     )
 
 
