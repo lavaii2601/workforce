@@ -978,6 +978,7 @@ def create_app():
             "_get_branch_staffing_rules": _get_branch_staffing_rules,
             "_week_start_and_day_for_datetime": _week_start_and_day_for_datetime,
             "_shift_start_datetime": _shift_start_datetime,
+            "_parse_db_datetime": _parse_db_datetime,
             "_format_db_datetime": _format_db_datetime,
             "_upsert_shift_attendance_mark": _upsert_shift_attendance_mark,
             "_weekly_hours_rows": _weekly_hours_rows,
