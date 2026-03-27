@@ -753,7 +753,9 @@ async function loadManagerShiftAttendanceToday() {
 
       const scheduleId = Number(btn.dataset.overrideShift);
       if (!scheduleId) return;
-      const note = document.querySelector(`input[data-override-note='${scheduleId}']`)?.value?.trim() || "";
+      const row = btn.closest(".shift-attendance-item");
+      const noteInput = row?.querySelector(`input[data-override-note='${scheduleId}']`);
+      const note = noteInput?.value?.trim() || "";
       await api("/api/manager/attendance-shifts/override", {
         method: "PUT",
         body: JSON.stringify({ schedule_id: scheduleId, note }),

@@ -13,6 +13,7 @@ def register_operations_routes(app, deps):
     get_branch_staffing_rules = deps["_get_branch_staffing_rules"]
     week_start_and_day_for_datetime = deps["_week_start_and_day_for_datetime"]
     shift_start_datetime = deps["_shift_start_datetime"]
+    parse_db_datetime = deps["_parse_db_datetime"]
     format_db_datetime = deps["_format_db_datetime"]
     upsert_shift_attendance_mark = deps["_upsert_shift_attendance_mark"]
     weekly_hours_rows = deps["_weekly_hours_rows"]
@@ -42,6 +43,14 @@ def register_operations_routes(app, deps):
         if hour < 0 or hour > 23 or minute < 0 or minute > 59:
             return None
         return f"{hour:02d}:{minute:02d}"
+
+    def _flex_shift_start_datetime(week_start, day_of_week, flexible_start_at):
+        text = _normalize_hhmm(flexible_start_at)
+        if not text:
+            return None
+        hour_text, minute_text = text.split(":")
+        day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=int(day_of_week) - 1)
+        return day_dt.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
 
     @app.post("/api/issues")
     def create_issue():
@@ -958,7 +967,12 @@ def register_operations_routes(app, deps):
 
         items = []
         for row in rows:
-            start_dt = shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
+            if row["shift_code"] == "FLEX":
+                start_dt = _flex_shift_start_datetime(
+                    row["week_start"], row["day_of_week"], row["flexible_start_at"]
+                )
+            else:
+                start_dt = shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
             if not start_dt:
                 continue
             late_deadline_dt = start_dt + timedelta(minutes=15)
@@ -970,7 +984,7 @@ def register_operations_routes(app, deps):
             late_minutes = 0
             if check_in_raw:
                 try:
-                    check_in_dt = datetime.strptime(str(check_in_raw), "%Y-%m-%d %H:%M:%S")
+                    check_in_dt = parse_db_datetime(str(check_in_raw))
                     if check_in_dt > start_dt:
                         late_minutes = int((check_in_dt - start_dt).total_seconds() // 60)
                 except (TypeError, ValueError):
