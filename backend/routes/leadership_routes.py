@@ -508,11 +508,8 @@ def register_leadership_routes(app, deps):
         body = request.get_json(silent=True) or {}
         name = (body.get("name") or "").strip()
         location = (body.get("location") or "").strip() or None
-        network_ip = (body.get("network_ip") or "").strip() or None
         if not name:
             return jsonify({"error": "name is required"}), 400
-        if network_ip and not is_valid_ipv4(network_ip):
-            return jsonify({"error": "network_ip must be a valid IPv4 address"}), 400
 
         conn = get_conn()
         branch = conn.execute(
@@ -522,6 +519,14 @@ def register_leadership_routes(app, deps):
         if not branch:
             conn.close()
             return jsonify({"error": "Branch not found"}), 404
+
+        if "network_ip" in body:
+            network_ip = (body.get("network_ip") or "").strip() or None
+            if network_ip and not is_valid_ipv4(network_ip):
+                conn.close()
+                return jsonify({"error": "network_ip must be a valid IPv4 address"}), 400
+        else:
+            network_ip = branch["network_ip"]
 
         dup = conn.execute(
             "SELECT 1 FROM branches WHERE LOWER(name) = LOWER(?) AND id != ?",

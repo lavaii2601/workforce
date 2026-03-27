@@ -1585,8 +1585,7 @@ function prettifyLegacyBranchAuditDetail(action, rawDetails) {
       const oldLocation = updated[2] || "chua cap nhat";
       const newName = updated[3] || "chua cap nhat";
       const newLocation = updated[4] || "chua cap nhat";
-      const newIp = updated[5] || "chua cau hinh";
-      return `Cap nhat chi nhanh "${newName}": doi ten tu "${oldName}" sang "${newName}". Cap nhat dia diem tu "${oldLocation}" sang "${newLocation}". IP router hien tai: ${newIp}.`;
+      return `Cap nhat chi nhanh "${newName}": doi ten tu "${oldName}" sang "${newName}". Cap nhat dia diem tu "${oldLocation}" sang "${newLocation}".`;
     }
   }
 
@@ -1652,7 +1651,6 @@ async function loadCeoBranches() {
         <div class="ceo-branch-view">
           <strong>${branch.name}</strong><br />
           <small>Địa điểm: ${branch.location || "-"}</small><br />
-          <small>IP router: ${branch.network_ip || "-"}</small><br />
           <small>Quản lý: ${branch.manager_count} | Nhân viên: ${branch.employee_count}</small>
         </div>
         <div class="ceo-branch-edit hidden">
@@ -1662,9 +1660,6 @@ async function loadCeoBranches() {
             </label>
             <label>Địa điểm
               <input type="text" data-branch-location-input value="${escapeHtml(branch.location || "")}" />
-            </label>
-            <label>IP router
-              <input type="text" data-branch-ip-input value="${escapeHtml(branch.network_ip || "")}" placeholder="VD: 203.113.10.20" />
             </label>
           </div>
           <small class="muted">Có thể cập nhật trực tiếp để sửa sai thông tin chi nhánh.</small>
@@ -1722,18 +1717,13 @@ async function loadCeoBranches() {
         const branchId = Number(target.dataset.branchSave);
         const name = String(row.querySelector("input[data-branch-name-input]")?.value || "").trim();
         const location = String(row.querySelector("input[data-branch-location-input]")?.value || "").trim();
-        const network_ip = String(row.querySelector("input[data-branch-ip-input]")?.value || "").trim();
         if (!name) {
           showToast("Tên chi nhánh không được để trống", true);
           return;
         }
-        if (network_ip && !/^\d{1,3}(\.\d{1,3}){3}$/.test(network_ip)) {
-          showToast("IP router không hợp lệ", true);
-          return;
-        }
         await api(`/api/admin/branches/${branchId}`, {
           method: "PUT",
-          body: JSON.stringify({ name, location, network_ip }),
+          body: JSON.stringify({ name, location }),
         });
         showToast("Đã cập nhật chi nhánh");
         ceoBranchAuditState.branchId = branchId;
@@ -1945,14 +1935,12 @@ async function loadCeoUsers() {
 async function createBranchByCeo() {
   const name = $("#ceo-branch-new-name").value.trim();
   const location = $("#ceo-branch-new-location").value.trim();
-  const network_ip = $("#ceo-branch-new-network-ip").value.trim();
   await api("/api/admin/branches", {
     method: "POST",
-    body: JSON.stringify({ name, location, network_ip }),
+    body: JSON.stringify({ name, location }),
   });
   $("#ceo-branch-new-name").value = "";
   $("#ceo-branch-new-location").value = "";
-  $("#ceo-branch-new-network-ip").value = "";
   showToast("Da them chi nhanh moi");
   ceoBranchState.page = 1;
   ceoBranchAuditState.page = 1;

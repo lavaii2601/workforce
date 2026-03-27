@@ -218,9 +218,17 @@ def get_conn(*, autocommit=False):
         pg_conn = psycopg.connect(**connect_kwargs)
         return _PgConnAdapter(pg_conn)
 
-    conn = sqlite3.connect(DB_PATH)
+    # Use a longer wait and WAL to reduce transient "database is locked" errors
+    # when multiple requests hit SQLite close together.
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        # Ignore if the database file cannot switch journal mode in this environment.
+        pass
     return conn
 
 

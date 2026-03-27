@@ -142,7 +142,14 @@ def register_operations_routes(app, deps):
         valid_rows = []
         seen = set()
         for item in selections:
-            branch_id = item.get("branch_id")
+            if not isinstance(item, dict):
+                conn.close()
+                return jsonify({"error": "Each selection must be an object"}), 400
+            try:
+                branch_id = int(item.get("branch_id"))
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"error": "branch_id must be an integer"}), 400
             shift_code = item.get("shift_code")
             day_of_week = normalize_day_of_week(item.get("day_of_week"))
             if branch_id not in allowed_branch_ids:
@@ -288,7 +295,14 @@ def register_operations_routes(app, deps):
         normalized = []
         seen = set()
         for item in assignments:
-            employee_id = item.get("employee_id")
+            if not isinstance(item, dict):
+                conn.close()
+                return jsonify({"error": "Each assignment must be an object"}), 400
+            try:
+                employee_id = int(item.get("employee_id"))
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"error": "employee_id must be an integer"}), 400
             shift_code = item.get("shift_code")
             day_of_week = normalize_day_of_week(item.get("day_of_week"))
             if shift_code not in shift_code_set:
@@ -661,6 +675,8 @@ def register_operations_routes(app, deps):
         normalized = []
         seen = set()
         for item in selections:
+            if not isinstance(item, dict):
+                return jsonify({"error": "Each selection must be an object"}), 400
             shift_code = item.get("shift_code")
             day_of_week = normalize_day_of_week(item.get("day_of_week"))
             if shift_code not in shift_code_set:

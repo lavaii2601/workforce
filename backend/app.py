@@ -541,18 +541,15 @@ def create_app():
     def _build_branch_create_audit_details(name, location, network_ip):
         return (
             f"Da tao chi nhanh \"{name}\". "
-            f"Dia diem: {_audit_text(location)}. "
-            f"IP router: {_audit_text(network_ip, 'chua cau hinh')}."
+            f"Dia diem: {_audit_text(location)}."
         )
 
     def _build_branch_update_audit_details(branch_before, *, name, location, network_ip):
         old_name = (branch_before["name"] or "").strip()
         old_location = (branch_before["location"] or "").strip()
-        old_network_ip = (branch_before["network_ip"] or "").strip()
 
         new_name = (name or "").strip()
         new_location = (location or "").strip()
-        new_network_ip = (network_ip or "").strip()
 
         changes = []
         if old_name != new_name:
@@ -561,13 +558,6 @@ def create_app():
             changes.append(
                 f"Cap nhat dia diem tu \"{_audit_text(old_location)}\" sang \"{_audit_text(new_location)}\"."
             )
-        if old_network_ip != new_network_ip:
-            changes.append(
-                "Cap nhat IP router "
-                f"tu \"{_audit_text(old_network_ip, 'chua cau hinh')}\" "
-                f"sang \"{_audit_text(new_network_ip, 'chua cau hinh')}\"."
-            )
-
         if not changes:
             return f"Da mo cap nhat cho chi nhanh \"{_audit_text(new_name)}\" nhung khong co thay doi du lieu."
 
@@ -576,8 +566,7 @@ def create_app():
     def _build_branch_delete_audit_details(branch_before):
         name = _audit_text(branch_before["name"])
         location = _audit_text(branch_before["location"])
-        network_ip = _audit_text(branch_before["network_ip"], "chua cau hinh")
-        return f"Da xoa chi nhanh \"{name}\". Dia diem cu: {location}. IP router cu: {network_ip}."
+        return f"Da xoa chi nhanh \"{name}\". Dia diem cu: {location}."
 
     def _normalize_day_of_week(value, *, allow_zero=False):
         try:
