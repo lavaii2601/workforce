@@ -463,7 +463,19 @@ def _init_db_inner():
     if IS_POSTGRES:
         _execute_postgres_script(cur, schema_sql)
     else:
-        cur.executescript(schema_sql)
+        # Legacy SQLite databases may not have branch_id in old tables yet.
+        # Skip branch-dependent indexes here and create them after migrations.
+        sqlite_schema_sql = schema_sql.replace(
+            """
+        CREATE INDEX IF NOT EXISTS idx_shift_preferences_week_branch
+        ON shift_preferences(week_start, branch_id);
+
+        CREATE INDEX IF NOT EXISTS idx_weekly_schedule_week_branch
+        ON weekly_schedule(week_start, branch_id);
+""",
+            "",
+        )
+        cur.executescript(sqlite_schema_sql)
         _run_migrations(conn)
 
     seed_data(conn)
@@ -526,8 +538,52 @@ def _run_migrations(conn):
 
     if not _table_has_column(conn, "shift_preferences", "day_of_week"):
         cur.execute("ALTER TABLE shift_preferences ADD COLUMN day_of_week INTEGER NOT NULL DEFAULT 0")
+    if not _table_has_column(conn, "shift_preferences", "branch_id"):
+        cur.execute("ALTER TABLE shift_preferences ADD COLUMN branch_id INTEGER")
+        cur.execute(
+            """
+            UPDATE shift_preferences
+            SET branch_id = COALESCE(
+                (
+                    SELECT eba.branch_id
+                    FROM employee_branch_access eba
+                    WHERE eba.employee_id = shift_preferences.employee_id
+                    ORDER BY eba.branch_id
+                    LIMIT 1
+                ),
+                (
+                    SELECT u.branch_id
+                    FROM users u
+                    WHERE u.id = shift_preferences.employee_id
+                )
+            )
+            WHERE branch_id IS NULL
+            """
+        )
+        cur.execute("DELETE FROM shift_preferences WHERE branch_id IS NULL")
     if not _table_has_column(conn, "weekly_schedule", "day_of_week"):
         cur.execute("ALTER TABLE weekly_schedule ADD COLUMN day_of_week INTEGER NOT NULL DEFAULT 0")
+    if not _table_has_column(conn, "weekly_schedule", "branch_id"):
+        cur.execute("ALTER TABLE weekly_schedule ADD COLUMN branch_id INTEGER")
+        cur.execute(
+            """
+            UPDATE weekly_schedule
+            SET branch_id = COALESCE(
+                (
+                    SELECT u.branch_id
+                    FROM users u
+                    WHERE u.id = weekly_schedule.assigned_by
+                ),
+                (
+                    SELECT u.branch_id
+                    FROM users u
+                    WHERE u.id = weekly_schedule.employee_id
+                )
+            )
+            WHERE branch_id IS NULL
+            """
+        )
+        cur.execute("DELETE FROM weekly_schedule WHERE branch_id IS NULL")
 
     cur.execute(
         """
@@ -692,7 +748,13 @@ def _run_migrations(conn):
         "CREATE INDEX IF NOT EXISTS idx_shift_preferences_week_day_shift ON shift_preferences(week_start, day_of_week, shift_code)"
     )
     cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shift_preferences_week_branch ON shift_preferences(week_start, branch_id)"
+    )
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_weekly_schedule_week_day_shift ON weekly_schedule(week_start, day_of_week, shift_code)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_weekly_schedule_week_branch ON weekly_schedule(week_start, branch_id)"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id, created_at)"
