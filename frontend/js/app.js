@@ -5,9 +5,15 @@ const state = {
   branches: [],
   employeeBranches: [],
   employeeFlexTimeByKey: {},
-  employeeFlexEditorDismissed: false,
+  employeeFlexEditorDismissed: (() => {
+    const saved = localStorage.getItem("wm_employee_flex_editor_dismissed");
+    return saved === "1";
+  })(),
   managerSelfFlexTimeByKey: {},
-  managerSelfFlexEditorDismissed: false,
+  managerSelfFlexEditorDismissed: (() => {
+    const saved = localStorage.getItem("wm_manager_flex_editor_dismissed");
+    return saved === "1";
+  })(),
   sidebarCollapsed: (() => {
     const saved = localStorage.getItem("wm_sidebar_collapsed");
     if (saved === null) {
@@ -17,7 +23,9 @@ const state = {
   })(),
   profileAvatarDataUrl: "",
   oneTimeScan: null,
+  employeeCanCheckInToday: false,
   managerDailyQr: null,
+  managerEmployeeAvatarObjectUrls: {},
 };
 
 const ceoBranchState = {
@@ -48,15 +56,26 @@ const managerEmployeeUiState = {
   keyword: "",
 };
 
+const employeePreferenceUiState = {
+  locked: false,
+};
+
 const authUiState = {
   screen: "login",
 };
 
 let sidebarResizeRafId = null;
+let employeeOneTimeCountdownTimerId = null;
+let employeeQrCameraStream = null;
+let employeeQrCameraLoopId = null;
+let employeeQrDetectInProgress = false;
 
 const WEEK_DAYS = [1, 2, 3, 4, 5, 6, 7];
 const SMALL_SHIFT_CODES = ["S1", "S2", "S3", "S4"];
 const managerStaffingRules = new Map();
+const PROFILE_AVATAR_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const PROFILE_AVATAR_MAX_DATA_URL_LENGTH = 350000;
+const PROFILE_AVATAR_MAX_DIMENSION = 640;
 
 const ROUTES = {
   employee: [
@@ -97,6 +116,57 @@ function toSafeChatHtml(value) {
   return escapeHtml(value || "").replaceAll("\n", "<br />");
 }
 
+function issueStatusLabel(value) {
+  const status = String(value || "").trim().toLowerCase();
+  if (status === "open") return "Mới";
+  if (status === "in_review") return "Đang xem xét";
+  if (status === "resolved") return "Đã xử lý";
+  if (status === "escalated") return "Đã chuyển cấp";
+  return value || "-";
+}
+
+function localizeApiMessage(message) {
+  let text = String(message || "").trim();
+  const replacements = [
+    ["Request failed", "Yêu cầu thất bại"],
+    ["Missing access token", "Thiếu mã truy cập"],
+    ["Invalid or expired session", "Phiên đăng nhập không hợp lệ hoặc đã hết hạn"],
+    ["Please check-out current session before new check-in", "Vui lòng check-out ca hiện tại trước khi check-in mới"],
+    ["No open attendance session to check-out", "Không có phiên chấm công đang mở để check-out"],
+    ["No open attendance session to confirm", "Không có phiên chấm công đang mở để xác nhận"],
+    ["Invalid, consumed, or expired one-time QR code", "Mã QR một lần không hợp lệ, đã dùng hoặc đã hết hạn"],
+    ["Invalid branch for attendance", "Chi nhánh chấm công không hợp lệ"],
+    ["No branch assigned for this employee", "Nhân viên chưa được gán chi nhánh"],
+    ["Branch is not in employee access scope", "Chi nhánh không nằm trong phạm vi được phép"],
+    ["User not found", "Không tìm thấy người dùng"],
+    ["username already exists", "Tên đăng nhập đã tồn tại"],
+  ];
+  replacements.forEach(([from, to]) => {
+    text = text.replaceAll(from, to);
+  });
+  return text;
+}
+
+function isSessionErrorMessage(message) {
+  const text = String(message || "").toLowerCase();
+  return (
+    text.includes("invalid or expired session") ||
+    text.includes("missing access token") ||
+    text.includes("phiên đăng nhập không hợp lệ") ||
+    text.includes("thiếu mã truy cập")
+  );
+}
+
+function forceSessionReset() {
+  state.token = null;
+  state.currentUser = null;
+  state.managerDailyQr = null;
+  state.oneTimeScan = null;
+  persistSession();
+  setShellByAuth();
+  window.location.hash = "";
+}
+
 function mondayOfCurrentWeekISO() {
   const now = new Date();
   const day = now.getDay();
@@ -122,6 +192,148 @@ function parseDbDateTimeToEpoch(raw) {
   return new Date(text.replace(" ", "T")).getTime();
 }
 
+function stopEmployeeOneTimeCountdown() {
+  if (employeeOneTimeCountdownTimerId) {
+    clearInterval(employeeOneTimeCountdownTimerId);
+    employeeOneTimeCountdownTimerId = null;
+  }
+}
+
+function renderEmployeeOneTimeCountdown() {
+  const note = $("#employee-one-time-scan-result");
+  if (!note || !state.oneTimeScan) return;
+  const expiresAtEpoch = Number(state.oneTimeScan.expiresAtEpoch || 0);
+  if (!Number.isFinite(expiresAtEpoch) || expiresAtEpoch <= 0) return;
+
+  const now = Date.now();
+  const remainSeconds = Math.max(0, Math.floor((expiresAtEpoch - now) / 1000));
+  if (remainSeconds <= 0) {
+    note.textContent = "Random key đã hết hạn. Vui lòng quét lại QR để nhận key mới.";
+    stopEmployeeOneTimeCountdown();
+    return;
+  }
+
+  note.textContent = `Random key nhận được: ${state.oneTimeScan.randomKey || "-"}. Con hieu luc ${remainSeconds}s.`;
+}
+
+function startEmployeeOneTimeCountdown() {
+  stopEmployeeOneTimeCountdown();
+  renderEmployeeOneTimeCountdown();
+  employeeOneTimeCountdownTimerId = setInterval(renderEmployeeOneTimeCountdown, 1000);
+}
+
+function stopEmployeeQrCameraScanner() {
+  if (employeeQrCameraLoopId) {
+    clearInterval(employeeQrCameraLoopId);
+    employeeQrCameraLoopId = null;
+  }
+  if (employeeQrCameraStream) {
+    employeeQrCameraStream.getTracks().forEach((track) => track.stop());
+    employeeQrCameraStream = null;
+  }
+  employeeQrDetectInProgress = false;
+  const video = $("#employee-qr-camera-video");
+  if (video) {
+    video.srcObject = null;
+  }
+  const modal = $("#employee-qr-camera-modal");
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+}
+
+async function openEmployeeQrCameraScanner() {
+  const modal = $("#employee-qr-camera-modal");
+  const video = $("#employee-qr-camera-video");
+  const status = $("#employee-qr-camera-status");
+  if (!modal || !video || !status) return;
+
+  if (!("mediaDevices" in navigator) || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("Trình duyệt không hỗ trợ camera. Vui lòng dán mã QR thủ công.");
+  }
+  if (!("BarcodeDetector" in window)) {
+    throw new Error("Thiết bị chưa hỗ trợ quét QR tự động. Vui lòng dán mã QR thủ công.");
+  }
+
+  stopEmployeeQrCameraScanner();
+  modal.classList.remove("hidden");
+  status.textContent = "Đang mở camera...";
+
+  try {
+    employeeQrCameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false,
+    });
+    video.srcObject = employeeQrCameraStream;
+    await video.play();
+
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    status.textContent = "Đưa mã QR vào khung camera để hệ thống tự nhận.";
+
+    employeeQrCameraLoopId = setInterval(async () => {
+      if (employeeQrDetectInProgress || !video.videoWidth || !video.videoHeight) {
+        return;
+      }
+      employeeQrDetectInProgress = true;
+      try {
+        const codes = await detector.detect(video);
+        const qrText = (codes && codes[0] && codes[0].rawValue) ? String(codes[0].rawValue).trim() : "";
+        if (!qrText) {
+          return;
+        }
+        status.textContent = "Đã nhận QR, đang lấy random key...";
+        $("#employee-one-time-qr-payload").value = qrText;
+        stopEmployeeQrCameraScanner();
+        await scanEmployeeOneTimeQr();
+      } catch {
+        // Ignore transient detector errors and keep scanning.
+      } finally {
+        employeeQrDetectInProgress = false;
+      }
+    }, 250);
+  } catch (error) {
+    stopEmployeeQrCameraScanner();
+    throw new Error(error?.message || "Không thể mở camera để quét QR");
+  }
+}
+
+async function readQrPayloadFromImageFile(file) {
+  if (!file) {
+    throw new Error("Vui lòng chọn ảnh QR");
+  }
+  if (!("BarcodeDetector" in window)) {
+    throw new Error("Trình duyệt chưa hỗ trợ quét QR từ ảnh. Vui lòng dùng camera trực tiếp hoặc dán mã thủ công.");
+  }
+
+  const bitmap = await createImageBitmap(file);
+  try {
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    const codes = await detector.detect(bitmap);
+    const qrText = (codes && codes[0] && codes[0].rawValue) ? String(codes[0].rawValue).trim() : "";
+    if (!qrText) {
+      throw new Error("Không nhận diện được QR trong ảnh. Vui lòng chọn ảnh rõ hơn.");
+    }
+    return qrText;
+  } finally {
+    bitmap.close();
+  }
+}
+
+async function scanEmployeeOneTimeQrFromImage(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+  const fileInput = $("#employee-qr-image-input");
+  try {
+    const qrPayload = await readQrPayloadFromImageFile(file);
+    $("#employee-one-time-qr-payload").value = qrPayload;
+    await scanEmployeeOneTimeQr();
+  } finally {
+    if (fileInput) {
+      fileInput.value = "";
+    }
+  }
+}
+
 function showToast(message, isError = false) {
   const toast = $("#toast");
   toast.textContent = message;
@@ -144,9 +356,46 @@ async function api(path, options = {}) {
   const res = await fetch(path, { ...options, headers });
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(payload.error || `Request failed: ${res.status}`);
+    const rawError = payload.error || `Yêu cầu thất bại: ${res.status}`;
+    if (res.status === 401 && state.token && isSessionErrorMessage(rawError)) {
+      forceSessionReset();
+      throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+    }
+    throw new Error(localizeApiMessage(rawError));
   }
   return payload;
+}
+
+async function withButtonLocks(buttonSelectors, action, { loadingText = "Đang lưu..." } = {}) {
+  const selectors = Array.isArray(buttonSelectors) ? buttonSelectors : [buttonSelectors];
+  const buttons = selectors
+    .map((selector) => (selector instanceof HTMLElement ? selector : $(selector)))
+    .filter((button) => button instanceof HTMLButtonElement);
+
+  if (buttons.some((button) => button.dataset.loading === "1")) {
+    return;
+  }
+
+  const snapshots = buttons.map((button) => ({
+    button,
+    text: button.textContent,
+  }));
+
+  snapshots.forEach(({ button }) => {
+    button.dataset.loading = "1";
+    button.disabled = true;
+    button.textContent = loadingText;
+  });
+
+  try {
+    await action();
+  } finally {
+    snapshots.forEach(({ button, text }) => {
+      button.dataset.loading = "0";
+      button.disabled = false;
+      button.textContent = text;
+    });
+  }
 }
 
 async function fetchCsv(path) {
@@ -358,6 +607,59 @@ function setProfileAvatarPreview(dataUrl) {
   }
 }
 
+function resizeImageDataUrlToJpeg(dataUrl, maxDimension, quality = 0.78) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const ratio = Math.min(1, maxDimension / Math.max(image.width, image.height));
+      const width = Math.max(1, Math.round(image.width * ratio));
+      const height = Math.max(1, Math.round(image.height * ratio));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas not supported"));
+        return;
+      }
+      ctx.drawImage(image, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    image.onerror = () => reject(new Error("Cannot read image"));
+    image.src = dataUrl;
+  });
+}
+
+async function prepareProfileAvatarDataUrl(file) {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Chi ho tro tep anh");
+  }
+  if (file.size > PROFILE_AVATAR_MAX_FILE_BYTES) {
+    throw new Error("Anh qua lon, vui long chon anh nho hon 2MB");
+  }
+
+  const originalDataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Khong the doc tep anh"));
+    reader.readAsDataURL(file);
+  });
+
+  if (originalDataUrl.length <= PROFILE_AVATAR_MAX_DATA_URL_LENGTH) {
+    return originalDataUrl;
+  }
+
+  const compressed = await resizeImageDataUrlToJpeg(
+    originalDataUrl,
+    PROFILE_AVATAR_MAX_DIMENSION,
+    0.75
+  );
+  if (compressed.length > PROFILE_AVATAR_MAX_DATA_URL_LENGTH) {
+    throw new Error("Anh van qua lon sau khi nen, vui long chon anh nho hon");
+  }
+  return compressed;
+}
+
 function toggleProfileRequiredModal(show) {
   const modal = $("#profile-required-modal");
   if (!modal) return;
@@ -471,60 +773,70 @@ async function renderRoute() {
   routeNode.classList.remove("hidden");
 
   const routeInfo = ROUTES[state.currentUser.role].find((r) => r.key === key);
-  $("#page-title").textContent = routeInfo ? routeInfo.title : "Dashboard";
+  $("#page-title").textContent = routeInfo ? routeInfo.title : "Tổng quan";
 
-  if (key === "employee-attendance") await loadMyAttendance("employee");
-  if (key === "employee-shifts") {
-    await loadEmployeeShifts();
-    await loadEmployeeRegistrationGroups();
-  }
-  if (key === "employee-assigned") await loadEmployeeAssignedSchedule();
-  if (key === "employee-issues") await loadMyIssues();
+  try {
+    if (key === "employee-attendance") {
+      await Promise.all([loadMyAttendance("employee"), loadCheckInAvailability("employee")]);
+    }
+    if (key === "employee-shifts") {
+      await Promise.all([loadEmployeeShifts(), loadEmployeeRegistrationGroups()]);
+    }
+    if (key === "employee-assigned") await loadEmployeeAssignedSchedule();
+    if (key === "employee-issues") await loadMyIssues();
 
-  if (key === "manager-attendance") {
-    await loadMyAttendance("manager");
-    await loadManagerShiftAttendanceToday();
-    $("#manager-attendance-one-time-meta").textContent =
-      "Nhấn Tạo QR cho ngày hôm nay. Mỗi lần nhân viên quét sẽ nhận random key one-time riêng.";
+    if (key === "manager-attendance") {
+      await Promise.all([loadMyAttendance("manager"), loadManagerShiftAttendanceToday()]);
+      await loadCheckInAvailability("manager");
+      $("#manager-attendance-one-time-meta").textContent =
+        "Nhấn Tạo QR cho ngày hôm nay. Mỗi lần nhân viên quét sẽ nhận mã xác thực một lần riêng.";
 
-    if (isManagerDailyQrValid(state.managerDailyQr)) {
-      applyManagerDailyQr(state.managerDailyQr, { showToastSuccess: false });
+      if (isManagerDailyQrValid(state.managerDailyQr)) {
+        applyManagerDailyQr(state.managerDailyQr, { showToastSuccess: false });
+        return;
+      }
+
+      try {
+        await generateManagerOneTimeQr({ showToastSuccess: false });
+      } catch (error) {
+        const oneTimeQrImage = $("#manager-attendance-one-time-qr-image");
+        if (oneTimeQrImage) {
+          oneTimeQrImage.classList.add("hidden");
+          oneTimeQrImage.removeAttribute("src");
+        }
+        const message = error instanceof Error ? error.message : "Khong tai duoc QR hom nay";
+        $("#manager-attendance-one-time-meta").textContent =
+          `Khong tai duoc QR hom nay: ${message}. Vui long bam Tao QR lai.`;
+      }
+    }
+    if (key === "manager-self-shifts") await loadManagerSelfShifts();
+    if (key === "manager-schedule") {
+      await Promise.all([loadManagerSchedule(), loadManagerRegistrationGroups()]);
+    }
+    if (key === "manager-issues") await loadManagerIssues();
+    if (key === "manager-employees") await loadManagerEmployees();
+
+    if (key === "ceo-chat") await loadCeoChat();
+    if (key === "ceo-issues") await loadCeoIssues();
+    if (key === "ceo-export") {
+      loadCeoExportBranchOptions();
+    }
+    if (key === "ceo-branches") {
+      await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
+    }
+    if (key === "ceo-users") {
+      loadCeoUserBranchOptions();
+      syncCeoUserRoleForm();
+      await loadCeoUsers();
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Khong tai duoc du lieu";
+    if (isSessionErrorMessage(message)) {
+      forceSessionReset();
+      showToast("Phien dang nhap da het han, vui long dang nhap lai", true);
       return;
     }
-
-    try {
-      await generateManagerOneTimeQr({ showToastSuccess: false });
-    } catch (error) {
-      const oneTimeQrImage = $("#manager-attendance-one-time-qr-image");
-      if (oneTimeQrImage) {
-        oneTimeQrImage.classList.add("hidden");
-        oneTimeQrImage.removeAttribute("src");
-      }
-      const message = error instanceof Error ? error.message : "Khong tai duoc QR hom nay";
-      $("#manager-attendance-one-time-meta").textContent =
-        `Khong tai duoc QR hom nay: ${message}. Vui long bam Tao QR lai.`;
-    }
-  }
-  if (key === "manager-self-shifts") await loadManagerSelfShifts();
-  if (key === "manager-schedule") {
-    await loadManagerSchedule();
-    await loadManagerRegistrationGroups();
-  }
-  if (key === "manager-issues") await loadManagerIssues();
-  if (key === "manager-employees") await loadManagerEmployees();
-
-  if (key === "ceo-chat") await loadCeoChat();
-  if (key === "ceo-issues") await loadCeoIssues();
-  if (key === "ceo-export") {
-    loadCeoExportBranchOptions();
-  }
-  if (key === "ceo-branches") {
-    await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
-  }
-  if (key === "ceo-users") {
-    loadCeoUserBranchOptions();
-    syncCeoUserRoleForm();
-    await loadCeoUsers();
+    showToast(localizeApiMessage(message), true);
   }
 }
 
@@ -676,7 +988,10 @@ function syncCeoUserRoleForm() {
   $("#ceo-new-user-branch-multi-wrap")?.classList.toggle("hidden", role !== "employee");
 }
 
-async function refreshBranchesMeta() {
+async function refreshBranchesMeta({ force = false } = {}) {
+  if (!force && state.branches.length) {
+    return;
+  }
   const meta = await api("/api/meta");
   state.branches = meta.branches || [];
 }
@@ -708,7 +1023,8 @@ async function loadMyAttendance(viewMode) {
     const confirmedText = item.confirmed_at
       ? ` | Mốc tính công: ${formatDateTimeDisplay(item.confirmed_at)}`
       : "";
-    row.innerHTML = `<span>${item.branch_name} | ${formatDateTimeDisplay(item.check_in_at)} -> ${item.check_out_at ? formatDateTimeDisplay(item.check_out_at) : "Đang làm"}${confirmedText}</span><strong>${(item.minutes_worked / 60).toFixed(2)}h</strong>`;
+    const sourceText = attendanceSourceText(item);
+    row.innerHTML = `<span>${item.branch_name} | ${formatDateTimeDisplay(item.check_in_at)} -> ${item.check_out_at ? formatDateTimeDisplay(item.check_out_at) : "Đang làm"}${confirmedText}<br /><small>${sourceText}</small></span><strong>${(item.minutes_worked / 60).toFixed(2)}h</strong>`;
     fragment.appendChild(row);
   });
   const sum = document.createElement("div");
@@ -716,6 +1032,59 @@ async function loadMyAttendance(viewMode) {
   sum.innerHTML = `<span>Tổng giờ trong tuần</span><strong>${(data.total_minutes / 60).toFixed(2)}h</strong>`;
   fragment.appendChild(sum);
   list.appendChild(fragment);
+}
+
+async function loadCheckInAvailability(viewMode) {
+  const payload = await api("/api/attendance/checkin-availability");
+  const canCheckIn = !!payload.can_check_in;
+  const reason = String(payload.reason || "").trim();
+
+  if (viewMode === "employee") {
+    state.employeeCanCheckInToday = canCheckIn;
+    updateEmployeeOneTimeCheckInButtonState(reason);
+    const note = $("#employee-one-time-scan-result");
+    if (note && !canCheckIn) {
+      note.textContent = reason || "Bạn chưa có ca làm hôm nay";
+    }
+  }
+
+  if (viewMode === "manager") {
+    const button = $("#btn-manager-check-in");
+    if (button) {
+      button.disabled = !canCheckIn;
+      button.title = canCheckIn ? "" : (reason || "Bạn chưa có ca làm hôm nay");
+    }
+  }
+
+  return payload;
+}
+
+function isEmployeeOneTimeKeyReady() {
+  if (!state.oneTimeScan) return false;
+  const typedKey = $("#employee-one-time-random-key")?.value?.trim()?.toUpperCase() || "";
+  return !!typedKey && typedKey === String(state.oneTimeScan.randomKey || "").toUpperCase();
+}
+
+function updateEmployeeOneTimeCheckInButtonState(reason = "") {
+  const button = $("#btn-check-in-one-time");
+  if (!button) return;
+
+  const keyReady = isEmployeeOneTimeKeyReady();
+  button.disabled = !keyReady;
+
+  if (!state.oneTimeScan) {
+    button.title = "Vui lòng quét QR để lấy random key";
+    return;
+  }
+  if (!keyReady) {
+    button.title = "Vui lòng nhập đúng random key để xác nhận";
+    return;
+  }
+  if (!state.employeeCanCheckInToday) {
+    button.title = reason || "Nhân viên không có ca làm, không thể check-in";
+    return;
+  }
+  button.title = "";
 }
 
 async function generateManagerOneTimeQr({ showToastSuccess = true } = {}) {
@@ -813,7 +1182,7 @@ async function loadManagerShiftAttendanceToday() {
 async function scanEmployeeOneTimeQr() {
   const payloadRaw = $("#employee-one-time-qr-payload").value.trim();
   if (!payloadRaw) {
-    throw new Error("Vui long nhap du lieu QR one-time");
+    throw new Error("Vui lòng nhập dữ liệu QR một lần");
   }
 
   const payload = await api("/api/attendance/scan-qr-one-time", {
@@ -825,14 +1194,21 @@ async function scanEmployeeOneTimeQr() {
     branchId: Number(payload.branch_id),
     qrToken: payload.qr_token,
     randomKey: payload.random_key,
+    expiresAt: payload.expires_at || "",
+    expiresAtEpoch: parseDbDateTimeToEpoch(payload.expires_at),
   };
   $("#employee-one-time-random-key").value = payload.random_key || "";
-  $("#employee-one-time-scan-result").textContent =
-    `Random key nhận được: ${payload.random_key || "-"}. Vui lòng nhập key để xác nhận bắt đầu chấm công.`;
+  updateEmployeeOneTimeCheckInButtonState();
+  startEmployeeOneTimeCountdown();
   showToast("Da quet QR va nhan random key");
 }
 
 async function checkInEmployeeOneTime() {
+  const availability = await loadCheckInAvailability("employee");
+  if (!availability.can_check_in) {
+    throw new Error(availability.reason || "Bạn chưa có ca làm hôm nay");
+  }
+
   const note = $("#attendance-note").value.trim();
   if (!state.oneTimeScan) {
     const payloadInput = $("#employee-one-time-qr-payload");
@@ -855,7 +1231,7 @@ async function checkInEmployeeOneTime() {
 
   const typedKey = $("#employee-one-time-random-key").value.trim().toUpperCase();
   if (!typedKey) {
-    throw new Error("Vui long nhap random key one-time");
+    throw new Error("Vui lòng nhập mã xác thực một lần");
   }
   if (typedKey !== state.oneTimeScan.randomKey) {
     throw new Error("Random key khong khop voi key vua quet");
@@ -870,21 +1246,29 @@ async function checkInEmployeeOneTime() {
       note,
     }),
   });
-  showToast("Check-in one-time thành công");
+  showToast("Bắt đầu chấm công thành công");
   $("#employee-one-time-qr-payload").value = "";
   $("#employee-one-time-random-key").value = "";
   $("#employee-one-time-scan-result").textContent = "";
   state.oneTimeScan = null;
+  stopEmployeeOneTimeCountdown();
+  state.employeeCanCheckInToday = false;
+  updateEmployeeOneTimeCheckInButtonState();
   await loadMyAttendance("employee");
 }
 
 async function checkOutEmployee() {
   await api("/api/attendance/check-out", { method: "POST" });
-  showToast("Check-out thành công");
+  showToast("Kết thúc ca thành công");
   await loadMyAttendance("employee");
 }
 
 async function checkInManager() {
+  const availability = await loadCheckInAvailability("manager");
+  if (!availability.can_check_in) {
+    throw new Error(availability.reason || "Bạn chưa có ca làm hôm nay");
+  }
+
   const note = $("#manager-attendance-note").value.trim();
   await api("/api/attendance/check-in", {
     method: "POST",
@@ -897,7 +1281,7 @@ async function checkInManager() {
 
 async function checkOutManager() {
   await api("/api/attendance/check-out", { method: "POST" });
-  showToast("Check-out thành công");
+  showToast("Kết thúc ca thành công");
   await loadMyAttendance("manager");
   await loadManagerShiftAttendanceToday();
 }
@@ -1042,6 +1426,46 @@ function shiftRangeByCode(shiftCode, record = null) {
 function rangesOverlap(a, b) {
   if (!a || !b) return false;
   return Math.max(a.start, b.start) < Math.min(a.end, b.end);
+}
+
+function validateNoShiftConflicts(selections, { includeBranch = false } = {}) {
+  const groups = new Map();
+
+  selections.forEach((item) => {
+    const day = Number(item.day_of_week || 0);
+    const branchPart = includeBranch ? String(Number(item.branch_id || 0)) : "GLOBAL";
+    const key = `${branchPart}|${day}`;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(item);
+  });
+
+  for (const [, records] of groups.entries()) {
+    for (let i = 0; i < records.length; i += 1) {
+      for (let j = i + 1; j < records.length; j += 1) {
+        const a = records[i];
+        const b = records[j];
+        const rangeA = shiftRangeByCode(a.shift_code, a);
+        const rangeB = shiftRangeByCode(b.shift_code, b);
+        if (rangesOverlap(rangeA, rangeB)) {
+          const dayText = weekDaysMeta().find((meta) => meta.day === Number(a.day_of_week))?.label || `Ngày ${a.day_of_week}`;
+          throw new Error(`Xung đột ca trong ${dayText}: ${a.shift_code} trùng giờ với ${b.shift_code}`);
+        }
+      }
+    }
+  }
+}
+
+function attendanceSourceText(item) {
+  if (item.attendance_source === "manager_override") {
+    const managerName = String(item.checked_in_by_manager_name || "").trim();
+    if (managerName && managerName !== "-") {
+      return `Nguồn: Quản lý xác nhận (${managerName})`;
+    }
+    return "Nguồn: Quản lý xác nhận";
+  }
+  return "Nguồn: Nhân viên tự check-in";
 }
 
 function employeeInitials(nameText) {
@@ -1279,6 +1703,14 @@ function managerSelfFlexDraftStorageKey() {
   return `wm_manager_flex_draft_${userId}_${currentWeek()}`;
 }
 
+function saveEmployeeFlexEditorDismissed() {
+  localStorage.setItem("wm_employee_flex_editor_dismissed", state.employeeFlexEditorDismissed ? "1" : "0");
+}
+
+function saveManagerFlexEditorDismissed() {
+  localStorage.setItem("wm_manager_flex_editor_dismissed", state.managerSelfFlexEditorDismissed ? "1" : "0");
+}
+
 function saveManagerSelfFlexDraft() {
   localStorage.setItem(
     managerSelfFlexDraftStorageKey(),
@@ -1501,13 +1933,16 @@ async function loadEmployeeRegistrationGroups() {
     const count = Number(item.member_count || 0);
     const max = item.max_members == null ? null : Number(item.max_members);
     const isFull = !!max && count >= max;
+    const membersText = String(item.members_text || "").trim() || "Chưa có thành viên";
     row.className = `list-item registration-group-item ${isFull ? "is-full" : ""}`;
     row.innerHTML = `
       <span>
-        <strong>${escapeHtml(item.group_name)}</strong> (${escapeHtml(item.group_code)})<br />
-        <small>${escapeHtml(item.branch_name)} | ${groupCapacityText(item)}</small>
+        <strong>Mã nhóm: ${escapeHtml(item.group_code)}</strong><br />
+        <small>Tên nhóm: ${escapeHtml(item.group_name || "-")}</small><br />
+        <small>${escapeHtml(item.branch_name)} | ${groupCapacityText(item)}</small><br />
+        <small>Thành viên: ${escapeHtml(membersText)}</small>
       </span>
-      <button class="ghost" data-use-group-code="${escapeHtml(item.group_code)}">Dùng mã nhóm</button>
+      <button class="ghost" data-use-group-code="${escapeHtml(item.group_code)}" ${employeePreferenceUiState.locked ? "disabled" : ""}>Dùng mã nhóm</button>
     `;
     list.appendChild(row);
   });
@@ -1525,6 +1960,9 @@ async function loadEmployeeRegistrationGroups() {
 }
 
 async function joinEmployeeGroup() {
+  if (employeePreferenceUiState.locked) {
+    throw new Error("Tuần này đã chốt ca, không thể chỉnh sửa thêm");
+  }
   const branch_id = Number($("#employee-group-branch").value);
   const group_code = $("#employee-group-code-join").value.trim();
   if (!branch_id) throw new Error("Vui lòng chọn chi nhánh");
@@ -1547,11 +1985,15 @@ async function joinEmployeeGroup() {
 }
 
 async function loadEmployeeShifts() {
-  const prefs = await api(`/api/employee/preferences?week_start=${encodeURIComponent(currentWeek())}`);
+  const weekStart = currentWeek();
+  const [prefs, lockInfo] = await Promise.all([
+    api(`/api/employee/preferences?week_start=${encodeURIComponent(weekStart)}`),
+    api(`/api/employee/preferences-lock?week_start=${encodeURIComponent(weekStart)}`),
+  ]);
+  employeePreferenceUiState.locked = !!lockInfo.locked;
 
   const prefMap = new Map();
   state.employeeFlexTimeByKey = {};
-  state.employeeFlexEditorDismissed = false;
   prefs.forEach((item) => {
     expandDays(item.day_of_week).forEach((day) => {
       const key = `${Number(item.branch_id)}|${item.shift_code}|${day}`;
@@ -1617,11 +2059,42 @@ async function loadEmployeeShifts() {
 
   list.appendChild(board);
   updateEmployeeRegistrationUiState();
+  const lockNote = $("#employee-shifts-lock-note");
+  if (lockNote) {
+    lockNote.textContent = employeePreferenceUiState.locked
+      ? "Tuần này đã chốt đăng ký ca. Bạn chỉ có thể chỉnh sửa khi sang tuần mới."
+      : "Bạn có thể đăng ký ca cho tuần hiện tại. Sau khi lưu lần đầu, hệ thống sẽ khóa đến tuần mới.";
+  }
+
+  const lockInputs = [
+    "#employee-registration-type",
+    "#employee-group-code",
+    "#employee-group-code-join",
+    "#employee-group-branch",
+    "#btn-employee-join-group",
+    "#btn-open-flex-editor",
+    "#btn-save-flex-hours-draft",
+    "#btn-save-employee-shifts",
+  ];
+  lockInputs.forEach((selector) => {
+    const node = $(selector);
+    if (node) {
+      node.disabled = employeePreferenceUiState.locked;
+    }
+  });
+  document.querySelectorAll("#employee-shift-grid input[type='checkbox']").forEach((checkbox) => {
+    checkbox.disabled = employeePreferenceUiState.locked;
+  });
+
+  await loadEmployeeRegistrationGroups();
   renderEmployeeFlexEditor();
   updateEmployeeShiftSummary();
 }
 
 async function saveEmployeeShifts() {
+  if (employeePreferenceUiState.locked) {
+    throw new Error("Tuần này đã chốt đăng ký ca, không thể chỉnh sửa thêm");
+  }
   const registrationType = $("#employee-registration-type").value;
   const groupCode = $("#employee-group-code").value.trim().toUpperCase();
 
@@ -1657,13 +2130,16 @@ async function saveEmployeeShifts() {
     }
   });
 
+  validateNoShiftConflicts(selections, { includeBranch: true });
+
   await api("/api/employee/preferences", {
     method: "PUT",
     body: JSON.stringify({ week_start: currentWeek(), selections }),
   });
+  employeePreferenceUiState.locked = true;
   saveEmployeeFlexDraft();
   showToast("Đã lưu ca làm");
-  await loadEmployeeRegistrationGroups();
+  await loadEmployeeShifts();
 }
 
 async function loadEmployeeAssignedSchedule() {
@@ -1724,11 +2200,15 @@ async function loadEmployeeAssignedSchedule() {
                   const modeLabel = item.registration_type === "group"
                     ? `Nhóm: ${item.group_code || "-"}`
                     : "Cá nhân";
+                  const teamLabel =
+                    item.registration_type === "group"
+                      ? ` | Team (${Number(item.team_size || 0)}): ${item.team_members_text || "-"}`
+                      : "";
                   const flexLabel =
                     item.shift_code === "FLEX" && item.flexible_start_at && item.flexible_end_at
                       ? ` | Linh hoạt: ${item.flexible_start_at}-${item.flexible_end_at}`
                       : "";
-                  return `<span class="tt-pill assigned-pill"><strong>${item.branch_name}</strong><small>Xếp bởi: ${item.assigned_by_name} | ${modeLabel}${flexLabel}</small></span>`;
+                  return `<span class="tt-pill assigned-pill"><strong>${item.branch_name}</strong><small>Xếp bởi: ${item.assigned_by_name} | ${modeLabel}${teamLabel}${flexLabel}</small></span>`;
                 }
               )
               .join("")
@@ -1758,6 +2238,23 @@ async function submitIssue() {
   await loadMyIssues();
 }
 
+async function renderMyIssueReplies(issueId) {
+  const listNode = document.querySelector(`div[data-my-issue-replies-list='${issueId}']`);
+  if (!listNode) return;
+  const replies = await api(`/api/issues/my/${issueId}/replies`);
+  listNode.innerHTML = "";
+  if (!replies.length) {
+    listNode.innerHTML = "<div class='list-item'><small>Chưa có phản hồi nào từ quản lý/CEO.</small></div>";
+    return;
+  }
+  replies.forEach((reply) => {
+    const row = document.createElement("div");
+    row.className = "list-item";
+    row.innerHTML = `<span><strong>${escapeHtml(reply.sender_name || "Không rõ")}</strong> (${escapeHtml(reply.sender_role || "-")})<br /><small>${escapeHtml(reply.message || "")}</small></span><small>${escapeHtml(reply.created_at || "")}</small>`;
+    listNode.appendChild(row);
+  });
+}
+
 async function loadMyIssues() {
   const allItems = await api("/api/issues/my");
   const selectedBranch = $("#employee-issue-branch-filter")?.value || "";
@@ -1768,16 +2265,58 @@ async function loadMyIssues() {
   list.innerHTML = "";
   items.forEach((item) => {
     const row = document.createElement("div");
+    const safeTitle = escapeHtml(item.title || "-");
+    const safeBranch = escapeHtml(item.branch_name || "-");
+    const safeStatus = escapeHtml(issueStatusLabel(item.status));
+    const safeDetails = escapeHtml(item.details || "-");
+    const safeManagerNote = escapeHtml(item.manager_note || "");
     row.className = "list-item";
-    row.innerHTML = `<span><strong>${item.title}</strong><br /><small>${item.branch_name} | ${item.status}</small></span><span>${item.created_at}</span>`;
+    row.innerHTML = `
+      <div>
+        <strong>${safeTitle}</strong><br /><small>${safeBranch} | ${safeStatus}</small>
+      </div>
+      <div class="row compact">
+        <button class="ghost" data-my-issue-detail-toggle="${item.id}">Xem nội dung</button>
+        <button class="ghost" data-my-issue-replies-toggle="${item.id}">Xem phản hồi</button>
+      </div>
+      <small>${escapeHtml(item.created_at || "")}</small>
+      <div class="issue-detail-box hidden" data-my-issue-detail="${item.id}">
+        <p><strong>Nội dung báo cáo:</strong> ${safeDetails}</p>
+        <p><strong>Ghi chú quản lý:</strong> ${safeManagerNote || "Chưa có"}</p>
+      </div>
+      <div class="issue-detail-box hidden" data-my-issue-replies="${item.id}">
+        <div class="list" data-my-issue-replies-list="${item.id}"></div>
+      </div>
+    `;
     list.appendChild(row);
+  });
+
+  document.querySelectorAll("button[data-my-issue-detail-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = Number(btn.dataset.myIssueDetailToggle);
+      const detail = document.querySelector(`div[data-my-issue-detail='${id}']`);
+      if (!detail) return;
+      detail.classList.toggle("hidden");
+      btn.textContent = detail.classList.contains("hidden") ? "Xem nội dung" : "Ẩn nội dung";
+    });
+  });
+
+  document.querySelectorAll("button[data-my-issue-replies-toggle]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = Number(btn.dataset.myIssueRepliesToggle);
+      const box = document.querySelector(`div[data-my-issue-replies='${id}']`);
+      if (!box) return;
+      box.classList.toggle("hidden");
+      if (!box.classList.contains("hidden")) {
+        await renderMyIssueReplies(id);
+      }
+    });
   });
 }
 
 async function loadManagerSelfShifts() {
   const prefs = await api(`/api/manager/self-preferences?week_start=${encodeURIComponent(currentWeek())}`);
   state.managerSelfFlexTimeByKey = {};
-  state.managerSelfFlexEditorDismissed = false;
   const checked = new Set(
     prefs.flatMap((x) => expandDays(x.day_of_week).map((day) => `${x.shift_code}|${day}`))
   );
@@ -1860,6 +2399,8 @@ async function saveManagerSelfShifts() {
       throw new Error("Giờ ra phải lớn hơn giờ vào ở FLEX của quản lý");
     }
   });
+
+  validateNoShiftConflicts(selections);
 
   await api("/api/manager/self-preferences", {
     method: "PUT",
@@ -2138,34 +2679,83 @@ async function saveManagerStaffingRules() {
   await loadManagerSchedule();
 }
 
+async function renderManagerIssueReplies(issueId) {
+  const listNode = document.querySelector(`div[data-issue-replies-list='${issueId}']`);
+  if (!listNode) return;
+  const replies = await api(`/api/manager/issues/${issueId}/replies`);
+  listNode.innerHTML = "";
+  if (!replies.length) {
+    listNode.innerHTML = "<div class='list-item'><small>Chua co phan hoi nao.</small></div>";
+    return;
+  }
+  replies.forEach((reply) => {
+    const row = document.createElement("div");
+    row.className = "list-item";
+    row.innerHTML = `<span><strong>${escapeHtml(reply.sender_name || "Không rõ")}</strong> (${escapeHtml(reply.sender_role || "-")})<br /><small>${escapeHtml(reply.message || "")}</small></span><small>${escapeHtml(reply.created_at || "")}</small>`;
+    listNode.appendChild(row);
+  });
+}
+
+async function renderCeoIssueReplies(issueId) {
+  const listNode = document.querySelector(`div[data-ceo-issue-replies-list='${issueId}']`);
+  if (!listNode) return;
+  const replies = await api(`/api/ceo/issues/${issueId}/replies`);
+  listNode.innerHTML = "";
+  if (!replies.length) {
+    listNode.innerHTML = "<div class='list-item'><small>Chua co phan hoi nao.</small></div>";
+    return;
+  }
+  replies.forEach((reply) => {
+    const row = document.createElement("div");
+    row.className = "list-item";
+    row.innerHTML = `<span><strong>${escapeHtml(reply.sender_name || "Không rõ")}</strong> (${escapeHtml(reply.sender_role || "-")})<br /><small>${escapeHtml(reply.message || "")}</small></span><small>${escapeHtml(reply.created_at || "")}</small>`;
+    listNode.appendChild(row);
+  });
+}
+
 async function loadManagerIssues() {
   const items = await api("/api/manager/issues");
   const list = $("#manager-issues-list");
   list.innerHTML = "";
 
   items.forEach((item) => {
+    const safeTitle = escapeHtml(item.title || "-");
+    const safeReporter = escapeHtml(item.reporter_name || "-");
+    const safeBranch = escapeHtml(item.branch_name || "-");
+    const safeStatus = escapeHtml(issueStatusLabel(item.status || "open"));
+    const safeDetails = escapeHtml(item.details || "-");
+    const safeManagerNote = escapeHtml(item.manager_note || "");
+    const isManagerReport = item.reporter_role === "manager";
     const row = document.createElement("div");
     row.className = "list-item";
     row.innerHTML = `
       <div>
-        <strong>${item.title}</strong><br />
-        <small>${item.reporter_name} | ${item.branch_name} | ${item.status}</small>
+        <strong>${safeTitle}</strong><br />
+        <small>${safeReporter} | ${safeBranch} | ${safeStatus}${isManagerReport ? " | Bao cao quan ly" : ""}</small>
       </div>
       <div class="row compact">
         <button class="ghost" data-issue-detail-toggle="${item.id}">Xem noi dung</button>
+        <button class="ghost" data-issue-replies-toggle="${item.id}">Phan hoi</button>
         <select data-status="${item.id}">
-          <option value="open" ${item.status === "open" ? "selected" : ""}>open</option>
-          <option value="in_review" ${item.status === "in_review" ? "selected" : ""}>in_review</option>
-          <option value="resolved" ${item.status === "resolved" ? "selected" : ""}>resolved</option>
-          <option value="escalated" ${item.status === "escalated" ? "selected" : ""}>escalated</option>
+          <option value="open" ${item.status === "open" ? "selected" : ""}>Mới</option>
+          <option value="in_review" ${item.status === "in_review" ? "selected" : ""}>Đang xem xét</option>
+          <option value="resolved" ${item.status === "resolved" ? "selected" : ""}>Đã xử lý</option>
+          <option value="escalated" ${item.status === "escalated" ? "selected" : ""}>Đã chuyển cấp</option>
         </select>
-        <label><input type="checkbox" data-escalate="${item.id}" ${item.escalated_to_ceo ? "checked" : ""}/> Escalate</label>
-        <input type="text" data-note="${item.id}" placeholder="Ghi chú" value="${item.manager_note || ""}" />
+        <label><input type="checkbox" data-escalate="${item.id}" ${item.escalated_to_ceo ? "checked" : ""}/> Chuyển CEO</label>
+        <input type="text" data-note="${item.id}" placeholder="Ghi chú" value="${safeManagerNote}" />
         <button data-save-issue="${item.id}">Lưu</button>
       </div>
       <div class="issue-detail-box hidden" data-issue-detail="${item.id}">
-        <p><strong>Noi dung bao cao:</strong> ${item.details || "-"}</p>
-        <p><strong>Ghi chu quan ly:</strong> ${item.manager_note || "Chua co"}</p>
+        <p><strong>Noi dung bao cao:</strong> ${safeDetails}</p>
+        <p><strong>Ghi chu quan ly:</strong> ${safeManagerNote || "Chua co"}</p>
+      </div>
+      <div class="issue-detail-box hidden" data-issue-replies="${item.id}">
+        <div class="list" data-issue-replies-list="${item.id}"></div>
+        <div class="row compact">
+          <input type="text" data-issue-reply-input="${item.id}" placeholder="Nhap phan hoi gui CEO/quan ly" />
+          <button class="ghost" data-issue-reply-send="${item.id}">Gui phan hoi</button>
+        </div>
       </div>
     `;
     list.appendChild(row);
@@ -2187,14 +2777,81 @@ async function loadManagerIssues() {
       const status = document.querySelector(`select[data-status='${id}']`).value;
       const escalate_to_ceo = document.querySelector(`input[data-escalate='${id}']`).checked;
       const manager_note = document.querySelector(`input[data-note='${id}']`).value;
+      const openDetailIds = [...document.querySelectorAll("div[data-issue-detail]:not(.hidden)")]
+        .map((node) => Number(node.dataset.issueDetail))
+        .filter((value) => Number.isFinite(value));
+      const openReplyIds = [...document.querySelectorAll("div[data-issue-replies]:not(.hidden)")]
+        .map((node) => Number(node.dataset.issueReplies))
+        .filter((value) => Number.isFinite(value));
       await api(`/api/manager/issues/${id}`, {
         method: "PUT",
         body: JSON.stringify({ status, escalate_to_ceo, manager_note }),
       });
       showToast("Da cap nhat bao cao");
       await loadManagerIssues();
+      openDetailIds.forEach((issueId) => {
+        const detail = document.querySelector(`div[data-issue-detail='${issueId}']`);
+        const toggle = document.querySelector(`button[data-issue-detail-toggle='${issueId}']`);
+        if (detail && detail.classList.contains("hidden")) {
+          detail.classList.remove("hidden");
+        }
+        if (toggle && detail) {
+          toggle.textContent = detail.classList.contains("hidden") ? "Xem noi dung" : "An noi dung";
+        }
+      });
+      for (const issueId of openReplyIds) {
+        const box = document.querySelector(`div[data-issue-replies='${issueId}']`);
+        if (box && box.classList.contains("hidden")) {
+          box.classList.remove("hidden");
+        }
+        await renderManagerIssueReplies(issueId);
+      }
     });
   });
+
+  document.querySelectorAll("button[data-issue-replies-toggle]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = Number(btn.dataset.issueRepliesToggle);
+      const box = document.querySelector(`div[data-issue-replies='${id}']`);
+      if (!box) return;
+      box.classList.toggle("hidden");
+      if (!box.classList.contains("hidden")) {
+        await renderManagerIssueReplies(id);
+      }
+    });
+  });
+
+  document.querySelectorAll("button[data-issue-reply-send]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = Number(btn.dataset.issueReplySend);
+      const input = document.querySelector(`input[data-issue-reply-input='${id}']`);
+      const message = input?.value?.trim() || "";
+      if (!message) {
+        showToast("Vui long nhap noi dung phan hoi", true);
+        return;
+      }
+      await api(`/api/manager/issues/${id}/replies`, {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      });
+      if (input) input.value = "";
+      showToast("Da gui phan hoi");
+      await renderManagerIssueReplies(id);
+    });
+  });
+}
+
+async function submitManagerReportToCeo() {
+  const title = $("#manager-ceo-report-title").value.trim();
+  const details = $("#manager-ceo-report-details").value.trim();
+  await api("/api/manager/issues/report-ceo", {
+    method: "POST",
+    body: JSON.stringify({ title, details }),
+  });
+  $("#manager-ceo-report-title").value = "";
+  $("#manager-ceo-report-details").value = "";
+  showToast("Da gui bao cao len CEO");
+  await loadManagerIssues();
 }
 
 async function loadManagerEmployees() {
@@ -2218,6 +2875,7 @@ async function loadManagerEmployees() {
   }
 
   const list = $("#manager-employees-list");
+  clearManagerEmployeeAvatarObjectUrls();
   list.innerHTML = "";
   if (!payload.employees.length) {
     const empty = document.createElement("div");
@@ -2245,7 +2903,8 @@ async function loadManagerEmployees() {
           <small>Vị trí: ${escapeHtml(position || "-")} | Ngày sinh: ${escapeHtml(birth || "-")}</small><br />
           <small>Số điện thoại: ${escapeHtml(phone || "-")}</small><br />
           <small>Địa chỉ: ${escapeHtml(address || "-")}</small><br />
-          <small>Chi nhánh: ${escapeHtml(branchNames || "-")}</small>
+          <small>Chi nhánh: ${escapeHtml(branchNames || "-")}</small><br />
+          <small>Avatar: yeu cau anh the 4x3</small>
         </div>
       </div>
       <div class="row compact">
@@ -2254,6 +2913,8 @@ async function loadManagerEmployees() {
     `;
     list.appendChild(row);
   });
+
+  await hydrateManagerEmployeeAvatars();
 }
 
 function bindManagerEmployeeListEvents() {
@@ -2299,6 +2960,61 @@ function setManagerEmployeeKeyword(value) {
   managerEmployeeUiState.keyword = (value || "").trim();
 }
 
+function clearManagerEmployeeAvatarObjectUrls() {
+  Object.values(state.managerEmployeeAvatarObjectUrls || {}).forEach((url) => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // Ignore revoke errors for already-collected object URLs.
+    }
+  });
+  state.managerEmployeeAvatarObjectUrls = {};
+}
+
+async function hydrateManagerEmployeeAvatars() {
+  const nodes = [...document.querySelectorAll(".manager-employee-avatar[data-avatar-url][data-employee-id]")];
+  if (!nodes.length) return;
+
+  await Promise.all(
+    nodes.map(async (node) => {
+      const avatarUrl = String(node.dataset.avatarUrl || "").trim();
+      const employeeId = Number(node.dataset.employeeId || 0);
+      if (!avatarUrl || !employeeId) return;
+
+      const headers = {};
+      if (state.token) {
+        headers.Authorization = `Bearer ${state.token}`;
+      }
+
+      try {
+        const response = await fetch(avatarUrl, {
+          headers,
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+
+        const previousUrl = state.managerEmployeeAvatarObjectUrls[employeeId];
+        if (previousUrl && previousUrl !== objectUrl) {
+          try {
+            URL.revokeObjectURL(previousUrl);
+          } catch {
+            // Ignore revoke errors for stale object URLs.
+          }
+        }
+
+        state.managerEmployeeAvatarObjectUrls[employeeId] = objectUrl;
+        node.style.backgroundImage = `url(${objectUrl})`;
+        node.classList.add("has-image");
+        node.textContent = "";
+      } catch {
+        // Keep initials fallback when avatar cannot be loaded.
+      }
+    })
+  );
+}
+
 function buildEmployeeAvatarHtml(employee) {
   const fullName = String(employee.full_name || "").trim() || String(employee.display_name || "").trim();
   const initials = (fullName || String(employee.username || "NV"))
@@ -2309,13 +3025,12 @@ function buildEmployeeAvatarHtml(employee) {
     .join("")
     .slice(0, 2) || "NV";
 
-  const avatarDataUrl = String(employee.avatar_data_url || "").trim();
-  if (!avatarDataUrl) {
+  const avatarUrl = String(employee.avatar_url || "").trim();
+  if (!avatarUrl) {
     return `<div class="manager-employee-avatar" aria-hidden="true">${escapeHtml(initials)}</div>`;
   }
 
-  const safeDataUrl = avatarDataUrl.replace(/'/g, "%27");
-  return `<div class="manager-employee-avatar has-image" style="background-image:url('${safeDataUrl}')" aria-hidden="true"></div>`;
+  return `<div class="manager-employee-avatar" data-avatar-url="${escapeHtml(avatarUrl)}" data-employee-id="${Number(employee.id || 0)}" aria-hidden="true">${escapeHtml(initials)}</div>`;
 }
 
 async function loadCeoChat() {
@@ -2326,7 +3041,7 @@ async function loadCeoChat() {
     const row = document.createElement("div");
     const typeClass = m.sender_type === "jarvis" ? "jarvis" : "user";
     const safeMessage = toSafeChatHtml((m.message || "").trim());
-    const safeSenderName = escapeHtml(m.sender_name || "Unknown");
+    const safeSenderName = escapeHtml(m.sender_name || "Không rõ");
     const safeCreatedAt = escapeHtml(m.created_at || "-");
     row.className = `chat-message ${typeClass}`;
     row.innerHTML = `
@@ -2351,19 +3066,32 @@ async function loadCeoIssues() {
   const list = $("#ceo-issues-list");
   list.innerHTML = "";
   items.forEach((item) => {
+    const safeTitle = escapeHtml(item.title || "-");
+    const safeBranch = escapeHtml(item.branch_name || "-");
+    const safeReporter = escapeHtml(item.reporter_name || "-");
+    const safeStatus = escapeHtml(issueStatusLabel(item.status || "-"));
+    const safeDetails = escapeHtml(item.details || "-");
+    const safeManagerNote = escapeHtml(item.manager_note || "");
     const row = document.createElement("div");
     row.className = "list-item";
     row.innerHTML = `
       <span>
-        <strong>${item.title}</strong><br /><small>${item.branch_name} | ${item.reporter_name}</small>
+        <strong>${safeTitle}</strong><br /><small>${safeBranch} | ${safeReporter} | ${safeStatus}</small>
       </span>
       <div class="row compact">
-        <span>${item.status}</span>
         <button class="ghost" data-ceo-issue-detail-toggle="${item.id}">Xem noi dung</button>
+        <button class="ghost" data-ceo-issue-replies-toggle="${item.id}">Phan hoi</button>
       </div>
       <div class="issue-detail-box hidden" data-ceo-issue-detail="${item.id}">
-        <p><strong>Noi dung bao cao:</strong> ${item.details || "-"}</p>
-        <p><strong>Ghi chu quan ly:</strong> ${item.manager_note || "Chua co"}</p>
+        <p><strong>Noi dung bao cao:</strong> ${safeDetails}</p>
+        <p><strong>Ghi chu quan ly:</strong> ${safeManagerNote || "Chua co"}</p>
+      </div>
+      <div class="issue-detail-box hidden" data-ceo-issue-replies="${item.id}">
+        <div class="list" data-ceo-issue-replies-list="${item.id}"></div>
+        <div class="row compact">
+          <input type="text" data-ceo-issue-reply-input="${item.id}" placeholder="Nhap phan hoi cho quan ly" />
+          <button class="ghost" data-ceo-issue-reply-send="${item.id}">Gui phan hoi</button>
+        </div>
       </div>
     `;
     list.appendChild(row);
@@ -2376,6 +3104,37 @@ async function loadCeoIssues() {
       if (!detail) return;
       detail.classList.toggle("hidden");
       btn.textContent = detail.classList.contains("hidden") ? "Xem noi dung" : "An noi dung";
+    });
+  });
+
+  document.querySelectorAll("button[data-ceo-issue-replies-toggle]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = Number(btn.dataset.ceoIssueRepliesToggle);
+      const box = document.querySelector(`div[data-ceo-issue-replies='${id}']`);
+      if (!box) return;
+      box.classList.toggle("hidden");
+      if (!box.classList.contains("hidden")) {
+        await renderCeoIssueReplies(id);
+      }
+    });
+  });
+
+  document.querySelectorAll("button[data-ceo-issue-reply-send]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = Number(btn.dataset.ceoIssueReplySend);
+      const input = document.querySelector(`input[data-ceo-issue-reply-input='${id}']`);
+      const message = input?.value?.trim() || "";
+      if (!message) {
+        showToast("Vui long nhap noi dung phan hoi", true);
+        return;
+      }
+      await api(`/api/ceo/issues/${id}/replies`, {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      });
+      if (input) input.value = "";
+      showToast("Da gui phan hoi");
+      await renderCeoIssueReplies(id);
     });
   });
 }
@@ -2616,7 +3375,7 @@ async function loadCeoBranches() {
 }
 
 async function refreshCeoBranchDependentViews() {
-  await refreshBranchesMeta();
+  await refreshBranchesMeta({ force: true });
   loadCeoExportBranchOptions();
   loadCeoUserBranchOptions();
   await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
@@ -2870,9 +3629,11 @@ async function logout() {
   } catch {
     // ignore
   }
+  clearManagerEmployeeAvatarObjectUrls();
   state.token = null;
   state.currentUser = null;
   state.managerDailyQr = null;
+  stopEmployeeQrCameraScanner();
   persistSession();
   setShellByAuth();
   window.location.hash = "";
@@ -2946,15 +3707,17 @@ function attachEvents() {
     submitRequiredProfile().catch((e) => showToast(e.message, true))
   );
   $("#btn-close-profile-modal").addEventListener("click", closeProfileModal);
-  $("#profile-avatar-input").addEventListener("change", (event) => {
+  $("#profile-avatar-input").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      state.profileAvatarDataUrl = String(reader.result || "");
+    try {
+      const preparedDataUrl = await prepareProfileAvatarDataUrl(file);
+      state.profileAvatarDataUrl = preparedDataUrl;
       setProfileAvatarPreview(state.profileAvatarDataUrl);
-    };
-    reader.readAsDataURL(file);
+    } catch (error) {
+      event.target.value = "";
+      showToast(error.message || "Khong the tai anh len", true);
+    }
   });
   $("#btn-week-refresh").addEventListener("click", () => renderRoute().catch((e) => showToast(e.message, true)));
 
@@ -2964,26 +3727,61 @@ function attachEvents() {
   $("#btn-scan-one-time-qr").addEventListener("click", () =>
     scanEmployeeOneTimeQr().catch((e) => showToast(e.message, true))
   );
+  $("#btn-open-employee-qr-camera").addEventListener("click", () =>
+    openEmployeeQrCameraScanner().catch((e) => showToast(e.message, true))
+  );
+  $("#btn-scan-employee-qr-image").addEventListener("click", () => {
+    $("#employee-qr-image-input").click();
+  });
+  $("#employee-qr-image-input").addEventListener("change", (event) => {
+    scanEmployeeOneTimeQrFromImage(event).catch((e) => showToast(e.message, true));
+  });
+  $("#btn-close-employee-qr-camera").addEventListener("click", stopEmployeeQrCameraScanner);
+  $("#employee-qr-camera-modal").addEventListener("click", (event) => {
+    if (event.target?.id === "employee-qr-camera-modal") {
+      stopEmployeeQrCameraScanner();
+    }
+  });
+  $("#employee-one-time-random-key").addEventListener("input", () => {
+    updateEmployeeOneTimeCheckInButtonState();
+  });
+  $("#employee-one-time-qr-payload").addEventListener("input", () => {
+    if (!$("#employee-one-time-qr-payload").value.trim()) {
+      state.oneTimeScan = null;
+      stopEmployeeOneTimeCountdown();
+    }
+    updateEmployeeOneTimeCheckInButtonState();
+  });
   $("#btn-check-out").addEventListener("click", () => checkOutEmployee().catch((e) => showToast(e.message, true)));
   $("#btn-confirm-attendance").addEventListener("click", () =>
     confirmAttendanceEmployee().catch((e) => showToast(e.message, true))
   );
-  $("#btn-save-employee-shifts").addEventListener("click", () => saveEmployeeShifts().catch((e) => showToast(e.message, true)));
+  $("#btn-save-employee-shifts").addEventListener("click", () =>
+    withButtonLocks("#btn-save-employee-shifts", () => saveEmployeeShifts(), { loadingText: "Đang lưu..." }).catch(
+      (e) => showToast(e.message, true)
+    )
+  );
   $("#employee-registration-type").addEventListener("change", updateEmployeeRegistrationUiState);
   $("#btn-open-flex-editor").addEventListener("click", () => {
     state.employeeFlexEditorDismissed = false;
+    saveEmployeeFlexEditorDismissed();
     renderEmployeeFlexEditor();
   });
   $("#btn-save-flex-hours-draft").addEventListener("click", () => {
     saveEmployeeFlexDraft();
+    state.employeeFlexEditorDismissed = true;
+    saveEmployeeFlexEditorDismissed();
+    renderEmployeeFlexEditor();
     showToast("Đã lưu giờ FLEX tạm");
   });
   $("#btn-close-flex-editor").addEventListener("click", () => {
     state.employeeFlexEditorDismissed = true;
+    saveEmployeeFlexEditorDismissed();
     renderEmployeeFlexEditor();
   });
   $("#employee-flex-modal-backdrop").addEventListener("click", () => {
     state.employeeFlexEditorDismissed = true;
+    saveEmployeeFlexEditorDismissed();
     renderEmployeeFlexEditor();
   });
   $("#employee-shift-grid").addEventListener("change", (event) => {
@@ -2992,6 +3790,7 @@ function attachEvents() {
     if (target.matches("input[type='checkbox'][data-shift]")) {
       if (target.dataset.shift === "FLEX" && target.checked) {
         state.employeeFlexEditorDismissed = false;
+        saveEmployeeFlexEditorDismissed();
       }
       renderEmployeeFlexEditor();
       updateEmployeeShiftSummary();
@@ -3003,6 +3802,7 @@ function attachEvents() {
     if (target.matches("input[type='checkbox'][data-shift]")) {
       if (target.dataset.shift === "FLEX" && target.checked) {
         state.managerSelfFlexEditorDismissed = false;
+        saveManagerFlexEditorDismissed();
       }
       renderManagerSelfFlexEditor();
       updateManagerSelfShiftSummary();
@@ -3010,18 +3810,24 @@ function attachEvents() {
   });
   $("#btn-open-manager-self-flex-editor").addEventListener("click", () => {
     state.managerSelfFlexEditorDismissed = false;
+    saveManagerFlexEditorDismissed();
     renderManagerSelfFlexEditor();
   });
   $("#btn-save-manager-flex-hours-draft").addEventListener("click", () => {
     saveManagerSelfFlexDraft();
+    state.managerSelfFlexEditorDismissed = true;
+    saveManagerFlexEditorDismissed();
+    renderManagerSelfFlexEditor();
     showToast("Đã lưu giờ FLEX tạm của quản lý");
   });
   $("#btn-close-manager-self-flex-editor").addEventListener("click", () => {
     state.managerSelfFlexEditorDismissed = true;
+    saveManagerFlexEditorDismissed();
     renderManagerSelfFlexEditor();
   });
   $("#manager-self-flex-modal-backdrop").addEventListener("click", () => {
     state.managerSelfFlexEditorDismissed = true;
+    saveManagerFlexEditorDismissed();
     renderManagerSelfFlexEditor();
   });
   $("#manager-preferences").addEventListener("change", (event) => {
@@ -3034,10 +3840,12 @@ function attachEvents() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !$("#employee-flex-editor-wrap")?.classList.contains("hidden")) {
       state.employeeFlexEditorDismissed = true;
+      saveEmployeeFlexEditorDismissed();
       renderEmployeeFlexEditor();
     }
     if (event.key === "Escape" && !$("#manager-self-flex-editor-wrap")?.classList.contains("hidden")) {
       state.managerSelfFlexEditorDismissed = true;
+      saveManagerFlexEditorDismissed();
       renderManagerSelfFlexEditor();
     }
   });
@@ -3063,7 +3871,11 @@ function attachEvents() {
   $("#btn-manager-generate-one-time-qr").addEventListener("click", () =>
     generateManagerOneTimeQr().catch((e) => showToast(e.message, true))
   );
-  $("#btn-save-manager-self-shifts").addEventListener("click", () => saveManagerSelfShifts().catch((e) => showToast(e.message, true)));
+  $("#btn-save-manager-self-shifts").addEventListener("click", () =>
+    withButtonLocks("#btn-save-manager-self-shifts", () => saveManagerSelfShifts(), {
+      loadingText: "Đang lưu...",
+    }).catch((e) => showToast(e.message, true))
+  );
   $("#manager-schedule-day-filter").addEventListener("change", (event) => {
     managerScheduleUiState.selectedDay = Number(event.target.value || 0);
     loadManagerSchedule().catch((e) => showToast(e.message, true));
@@ -3073,14 +3885,23 @@ function attachEvents() {
     loadManagerSchedule().catch((e) => showToast(e.message, true));
   });
   const managerScheduleSaveHandler = () =>
-    saveManagerSchedule().catch((e) => showToast(e.message, true));
+    withButtonLocks(
+      ["#btn-save-manager-schedule", "#btn-save-manager-schedule-inline"],
+      () => saveManagerSchedule(),
+      { loadingText: "Đang lưu..." }
+    ).catch((e) => showToast(e.message, true));
   $("#btn-save-manager-schedule").addEventListener("click", managerScheduleSaveHandler);
   $("#btn-save-manager-schedule-inline").addEventListener("click", managerScheduleSaveHandler);
   $("#btn-save-manager-staffing-rules").addEventListener("click", () =>
-    saveManagerStaffingRules().catch((e) => showToast(e.message, true))
+    withButtonLocks("#btn-save-manager-staffing-rules", () => saveManagerStaffingRules(), {
+      loadingText: "Đang lưu...",
+    }).catch((e) => showToast(e.message, true))
   );
   $("#btn-manager-create-group").addEventListener("click", () =>
     createManagerRegistrationGroup().catch((e) => showToast(e.message, true))
+  );
+  $("#btn-submit-manager-ceo-report").addEventListener("click", () =>
+    submitManagerReportToCeo().catch((e) => showToast(e.message, true))
   );
   $("#btn-create-employee").addEventListener("click", () => createEmployee().catch((e) => showToast(e.message, true)));
   $("#btn-manager-employee-search").addEventListener("click", () => {
@@ -3227,6 +4048,143 @@ function initPwaUiMode() {
   });
 }
 
+function clampCompactButtonPosition(btn, x, y) {
+  const rect = btn.getBoundingClientRect();
+  const width = Math.max(40, Math.round(rect.width || 48));
+  const height = Math.max(40, Math.round(rect.height || 48));
+  const margin = 8;
+  const maxX = Math.max(margin, window.innerWidth - width - margin);
+  const maxY = Math.max(margin, window.innerHeight - height - margin);
+  return {
+    x: Math.min(Math.max(margin, Math.round(x)), maxX),
+    y: Math.min(Math.max(margin, Math.round(y)), maxY),
+  };
+}
+
+function applyCompactButtonPosition(btn, position, { save = false } = {}) {
+  if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+    btn.classList.remove("is-positioned");
+    btn.style.left = "";
+    btn.style.top = "";
+    btn.style.right = "";
+    btn.style.bottom = "";
+    localStorage.removeItem("wm_compact_btn_pos");
+    updateCompactButtonToastAvoidance(btn);
+    return;
+  }
+
+  const clamped = clampCompactButtonPosition(btn, position.x, position.y);
+  btn.classList.add("is-positioned");
+  btn.style.left = `${clamped.x}px`;
+  btn.style.top = `${clamped.y}px`;
+  btn.style.right = "auto";
+  btn.style.bottom = "auto";
+  if (save) {
+    localStorage.setItem("wm_compact_btn_pos", JSON.stringify(clamped));
+  }
+  updateCompactButtonToastAvoidance(btn);
+}
+
+function updateCompactButtonToastAvoidance(btn) {
+  const rect = btn.getBoundingClientRect();
+  const nearBottom = window.innerHeight - rect.bottom <= 96;
+  const nearRight = window.innerWidth - rect.right <= 196;
+  document.body.classList.toggle("fab-over-toast", nearBottom && nearRight);
+}
+
+function initCompactButtonDrag(btn) {
+  const raw = localStorage.getItem("wm_compact_btn_pos");
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      applyCompactButtonPosition(btn, parsed, { save: false });
+    } catch {
+      localStorage.removeItem("wm_compact_btn_pos");
+    }
+  } else {
+    updateCompactButtonToastAvoidance(btn);
+  }
+
+  let pointerId = null;
+  let startX = 0;
+  let startY = 0;
+  let originX = 0;
+  let originY = 0;
+  let moved = false;
+
+  btn.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    pointerId = event.pointerId;
+    btn.setPointerCapture(pointerId);
+    const rect = btn.getBoundingClientRect();
+    startX = event.clientX;
+    startY = event.clientY;
+    originX = rect.left;
+    originY = rect.top;
+    moved = false;
+    btn.classList.remove("dragging");
+  });
+
+  btn.addEventListener("pointermove", (event) => {
+    if (pointerId == null || event.pointerId !== pointerId) return;
+    const dx = event.clientX - startX;
+    const dy = event.clientY - startY;
+    if (!moved && Math.hypot(dx, dy) >= 8) {
+      moved = true;
+      btn.classList.add("dragging");
+    }
+    if (!moved) return;
+    applyCompactButtonPosition(
+      btn,
+      {
+        x: originX + dx,
+        y: originY + dy,
+      },
+      { save: false }
+    );
+  });
+
+  const endDrag = (event) => {
+    if (pointerId == null || event.pointerId !== pointerId) return;
+    if (btn.hasPointerCapture(pointerId)) {
+      btn.releasePointerCapture(pointerId);
+    }
+    pointerId = null;
+    btn.classList.remove("dragging");
+    if (moved) {
+      btn.dataset.dragMoved = "1";
+      const rect = btn.getBoundingClientRect();
+      applyCompactButtonPosition(btn, { x: rect.left, y: rect.top }, { save: true });
+      window.setTimeout(() => {
+        btn.dataset.dragMoved = "";
+      }, 180);
+    }
+  };
+
+  btn.addEventListener("pointerup", endDrag);
+  btn.addEventListener("pointercancel", endDrag);
+
+  btn.addEventListener("dblclick", () => {
+    applyCompactButtonPosition(btn, null);
+    showToast("Đã đưa nút về vị trí mặc định");
+  });
+
+  window.addEventListener("resize", () => {
+    const rawPos = localStorage.getItem("wm_compact_btn_pos");
+    if (!rawPos) {
+      updateCompactButtonToastAvoidance(btn);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(rawPos);
+      applyCompactButtonPosition(btn, parsed, { save: true });
+    } catch {
+      localStorage.removeItem("wm_compact_btn_pos");
+      updateCompactButtonToastAvoidance(btn);
+    }
+  });
+}
+
 // ===== COMPACT MODE TOGGLE =====
 function initCompactMode() {
   const isCompactMode = localStorage.getItem("wm_compact_mode") === "1";
@@ -3237,7 +4195,12 @@ function initCompactMode() {
   const btn = $("#btn-compact-mode");
   if (!btn) return;
 
+  initCompactButtonDrag(btn);
+
   btn.addEventListener("click", () => {
+    if (btn.dataset.dragMoved === "1") {
+      return;
+    }
     document.body.classList.toggle("compact-mode");
     const isNowCompact = document.body.classList.contains("compact-mode");
     localStorage.setItem("wm_compact_mode", isNowCompact ? "1" : "0");

@@ -29,7 +29,7 @@ SECURITY_CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
     "style-src 'self'; "
-    "img-src 'self' data:; "
+    "img-src 'self' data: blob:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
@@ -134,7 +134,7 @@ def create_app():
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         if IS_VERCEL:
@@ -144,7 +144,7 @@ def create_app():
 
     @app.errorhandler(RequestEntityTooLarge)
     def _handle_request_too_large(_error):
-        return jsonify({"error": "Payload too large"}), 413
+        return jsonify({"error": "Payload too large (max 2MB). Please reduce image/file size and try again."}), 413
 
     def _is_stateless_session_enabled():
         return stateless_session_enabled
@@ -517,7 +517,12 @@ def create_app():
         placeholders = ",".join(["?"] * len(employee_ids))
 
         details_sql = f"""
-            SELECT employee_id, branch_id, check_in_at, check_out_at
+            SELECT employee_id,
+               branch_id,
+               check_in_at,
+               check_out_at,
+               COALESCE(minutes_late, 0) AS minutes_late,
+               checked_in_by_manager_id
             FROM attendance_logs
             WHERE check_in_at >= ?
               AND check_in_at < ?
@@ -530,35 +535,6 @@ def create_app():
         details_sql += " ORDER BY employee_id, check_in_at"
 
         detail_rows = conn.execute(details_sql, tuple(params)).fetchall()
-
-        schedule_sql = f"""
-            SELECT week_start, day_of_week, shift_code, branch_id, employee_id, flexible_start_at
-            FROM weekly_schedule
-            WHERE week_start = ?
-              AND employee_id IN ({placeholders})
-        """
-        schedule_params = [week_start, *employee_ids]
-        if branch_id:
-            schedule_sql += " AND branch_id = ?"
-            schedule_params.append(branch_id)
-        schedule_rows = conn.execute(schedule_sql, tuple(schedule_params)).fetchall()
-
-        schedule_by_emp_day = {}
-        for row in schedule_rows:
-            emp_id = int(row["employee_id"])
-            key = (emp_id, int(row["day_of_week"]), int(row["branch_id"]))
-            entries = schedule_by_emp_day.setdefault(key, [])
-
-            if row["shift_code"] == "FLEX":
-                start_dt = _day_datetime_from_hhmm(
-                    row["week_start"],
-                    row["day_of_week"],
-                    row["flexible_start_at"],
-                )
-            else:
-                start_dt = _shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
-            if start_dt:
-                entries.append(start_dt)
 
         marks_sql = f"""
             SELECT employee_id, status, source, week_start
@@ -588,6 +564,7 @@ def create_app():
                     "seen_dates": set(),
                     "check_ins": [],
                     "check_outs": [],
+                    "sources": [],
                     "late_minutes_total": 0,
                 },
             )
@@ -605,18 +582,10 @@ def create_app():
             if check_out_raw:
                 bucket["check_outs"].append(check_out_raw)
 
-            if check_in_raw:
-                try:
-                    check_in_dt = _parse_db_datetime(check_in_raw)
-                    _, day_of_week = _week_start_and_day_for_datetime(check_in_dt)
-                    schedule_key = (emp_id, day_of_week, int(row["branch_id"]))
-                    starts = schedule_by_emp_day.get(schedule_key) or []
-                    if starts:
-                        nearest_start = min(starts, key=lambda dt: abs((check_in_dt - dt).total_seconds()))
-                        if check_in_dt > nearest_start:
-                            bucket["late_minutes_total"] += int((check_in_dt - nearest_start).total_seconds() // 60)
-                except (TypeError, ValueError):
-                    pass
+            source_label = "manager_override" if row["checked_in_by_manager_id"] else "employee_self"
+            bucket["sources"].append(source_label)
+
+            bucket["late_minutes_total"] += max(0, int(row["minutes_late"] or 0))
 
         for item in out:
             detail = by_employee.get(int(item["employee_id"]))
@@ -624,16 +593,16 @@ def create_app():
                 item["work_dates"] = ""
                 item["check_in_times"] = ""
                 item["check_out_times"] = ""
+                item["attendance_sources"] = ""
                 item["late_minutes_total"] = 0
-                item["penalty_minutes_recommended"] = 0
                 item["late_shortage_override_sessions"] = 0
                 continue
 
             item["work_dates"] = " | ".join(detail["dates"])
             item["check_in_times"] = " | ".join(detail["check_ins"])
             item["check_out_times"] = " | ".join(detail["check_outs"])
+            item["attendance_sources"] = " | ".join(detail["sources"])
             item["late_minutes_total"] = int(detail["late_minutes_total"])
-            item["penalty_minutes_recommended"] = int(detail["late_minutes_total"])
             item["late_shortage_override_sessions"] = int(
                 override_count_by_emp.get(int(item["employee_id"]), 0)
             )
@@ -646,11 +615,71 @@ def create_app():
         writer.writerow(headers)
         for row in rows:
             writer.writerow(row)
+        csv_text = "\ufeff" + buf.getvalue()
         return Response(
-            buf.getvalue(),
-            mimetype="text/csv",
+            csv_text,
+            mimetype="text/csv; charset=utf-8",
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
+
+    def _build_weekly_payroll_csv(rows, week_start):
+        headers = [
+            "Tuan",
+            "Ma nhan vien",
+            "Tai khoan",
+            "Ten nhan vien",
+            "Vai tro",
+            "Chi nhanh",
+            "Tong gio cong",
+            "So lan cham cong",
+            "Ngay lam",
+            "Gio vao",
+            "Gio ra",
+            "Nguon cham cong",
+            "Tong phut di tre",
+            "Ghi chu ke toan",
+            "So ca quan ly xac nhan thieu nhan su",
+        ]
+
+        def _fmt_list_cell(value):
+            text = str(value or "").strip()
+            if not text:
+                return "-"
+            return text.replace(" | ", "; ")
+
+        def _fmt_source_cell(value):
+            text = str(value or "").strip()
+            if not text:
+                return "-"
+            mapping = {
+                "employee_self": "Nhan vien tu check-in",
+                "manager_override": "Quan ly xac nhan",
+            }
+            labels = [mapping.get(item.strip(), item.strip()) for item in text.split("|") if item.strip()]
+            return "; ".join(labels) if labels else "-"
+
+        csv_rows = [
+            [
+                week_start,
+                item["employee_id"],
+                item["username"],
+                item["employee_name"],
+                item["role"],
+                item["branch_name"],
+                f"{(item['total_minutes'] / 60):.2f}",
+                item["attendance_sessions"],
+                _fmt_list_cell(item.get("work_dates", "")),
+                _fmt_list_cell(item.get("check_in_times", "")),
+                _fmt_list_cell(item.get("check_out_times", "")),
+                _fmt_source_cell(item.get("attendance_sources", "")),
+                item.get("late_minutes_total", 0),
+                "Ke toan xu ly" if item.get("late_minutes_total", 0) > 0 else "",
+                item.get("late_shortage_override_sessions", 0),
+            ]
+            for item in rows
+        ]
+
+        return headers, csv_rows
 
     def _parse_pagination(default_page=1, default_page_size=10, max_page_size=100):
         page_raw = (request.args.get("page") or str(default_page)).strip()
@@ -892,7 +921,7 @@ def create_app():
             (employee_id, branch_id, week_start, day_of_week),
         ).fetchall()
         if not rows:
-            return None, None, None, None, "Không có ca được phân cho hôm nay"
+            return None, None, None, None, "Nhân viên không có ca làm, không thể check-in"
 
         enriched = []
         for row in rows:
@@ -915,7 +944,12 @@ def create_app():
             return None, None, None, None, "Không xác định được thời gian ca"
 
         enriched.sort(key=lambda item: item[1])
+        if current_dt < enriched[0][1]:
+            return None, None, None, week_start, "Chưa tới ca làm việc"
+
         for row, start_dt, late_deadline in enriched:
+            if current_dt < start_dt:
+                return None, None, None, week_start, "Chưa tới ca làm việc"
             if current_dt <= late_deadline:
                 return row, start_dt, late_deadline, week_start, None
 
@@ -983,6 +1017,7 @@ def create_app():
             "_upsert_shift_attendance_mark": _upsert_shift_attendance_mark,
             "_weekly_hours_rows": _weekly_hours_rows,
             "_csv_response": _csv_response,
+            "_build_weekly_payroll_csv": _build_weekly_payroll_csv,
             "_manager_can_manage_employee": _manager_can_manage_employee,
             "SHIFT_CODE_SET": SHIFT_CODE_SET,
             "SHIFT_DEFINITIONS": SHIFT_DEFINITIONS,
@@ -996,6 +1031,7 @@ def create_app():
             "_get_user_from_token": _get_user_from_token,
             "_weekly_hours_rows": _weekly_hours_rows,
             "_csv_response": _csv_response,
+            "_build_weekly_payroll_csv": _build_weekly_payroll_csv,
             "_create_audit_log": _create_audit_log,
             "_parse_pagination": _parse_pagination,
             "_is_valid_ipv4": _is_valid_ipv4,

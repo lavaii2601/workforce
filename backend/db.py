@@ -2,6 +2,7 @@ import os
 import re
 import socket
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -25,6 +26,7 @@ ID_TABLES = {
     "attendance_qr_one_time_codes",
     "shift_attendance_marks",
     "issue_reports",
+    "issue_report_replies",
     "audit_logs",
 }
 
@@ -96,6 +98,11 @@ def is_postgres_backend():
 
 
 def _transform_sql_for_postgres(sql):
+    return _transform_sql_for_postgres_cached(str(sql or ""))
+
+
+@lru_cache(maxsize=1024)
+def _transform_sql_for_postgres_cached(sql):
     transformed = sql
     has_nocase = "COLLATE NOCASE" in transformed.upper()
     if has_nocase:
@@ -338,10 +345,15 @@ def _init_db_inner():
             confirmed_at TEXT,
             check_out_at TEXT,
             minutes_worked INTEGER,
+            scheduled_shift_start_at TEXT,
+            minutes_late INTEGER DEFAULT 0,
+            checked_in_by_manager_id INTEGER,
+            manager_check_in_note TEXT,
             note TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL,
+            FOREIGN KEY (checked_in_by_manager_id) REFERENCES users(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS attendance_confirm_logs (
@@ -448,6 +460,17 @@ def _init_db_inner():
             FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS issue_report_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            sender_role TEXT NOT NULL CHECK (sender_role IN ('manager', 'ceo')),
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (issue_id) REFERENCES issue_reports(id) ON DELETE CASCADE,
+            FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             actor_user_id INTEGER NOT NULL,
@@ -540,6 +563,9 @@ def _init_db_inner():
 
         CREATE INDEX IF NOT EXISTS idx_issue_reports_escalated
         ON issue_reports(escalated_to_ceo, created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_issue_report_replies_issue_created
+        ON issue_report_replies(issue_id, created_at);
 
         CREATE INDEX IF NOT EXISTS idx_audit_logs_target
         ON audit_logs(target_type, target_id, created_at);
@@ -729,15 +755,28 @@ def _run_migrations(conn):
             confirmed_at TEXT,
             check_out_at TEXT,
             minutes_worked INTEGER,
+            scheduled_shift_start_at TEXT,
+            minutes_late INTEGER DEFAULT 0,
+            checked_in_by_manager_id INTEGER,
+            manager_check_in_note TEXT,
             note TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL,
+            FOREIGN KEY (checked_in_by_manager_id) REFERENCES users(id) ON DELETE SET NULL
         )
         """
     )
     if not _table_has_column(conn, "attendance_logs", "confirmed_at"):
         cur.execute("ALTER TABLE attendance_logs ADD COLUMN confirmed_at TEXT")
+    if not _table_has_column(conn, "attendance_logs", "scheduled_shift_start_at"):
+        cur.execute("ALTER TABLE attendance_logs ADD COLUMN scheduled_shift_start_at TEXT")
+    if not _table_has_column(conn, "attendance_logs", "minutes_late"):
+        cur.execute("ALTER TABLE attendance_logs ADD COLUMN minutes_late INTEGER DEFAULT 0")
+    if not _table_has_column(conn, "attendance_logs", "checked_in_by_manager_id"):
+        cur.execute("ALTER TABLE attendance_logs ADD COLUMN checked_in_by_manager_id INTEGER")
+    if not _table_has_column(conn, "attendance_logs", "manager_check_in_note"):
+        cur.execute("ALTER TABLE attendance_logs ADD COLUMN manager_check_in_note TEXT")
 
     cur.execute(
         """
@@ -875,6 +914,21 @@ def _run_migrations(conn):
 
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS issue_report_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            sender_role TEXT NOT NULL CHECK (sender_role IN ('manager', 'ceo')),
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (issue_id) REFERENCES issue_reports(id) ON DELETE CASCADE,
+            FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             actor_user_id INTEGER NOT NULL,
@@ -955,6 +1009,9 @@ def _run_migrations(conn):
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_issue_reports_escalated ON issue_reports(escalated_to_ceo, created_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issue_report_replies_issue_created ON issue_report_replies(issue_id, created_at)"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_shift_preferences_week_day_shift ON shift_preferences(week_start, day_of_week, shift_code)"

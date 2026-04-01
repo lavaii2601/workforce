@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from threading import Lock
 
 from flask import jsonify, request
 
@@ -23,18 +24,43 @@ def register_attendance_routes(app, deps):
 
     attendance_qr_one_time_ttl_seconds = deps["ATTENDANCE_QR_ONE_TIME_TTL_SECONDS"]
     attendance_qr_enabled = deps.get("ATTENDANCE_QR_ENABLED", True)
+    qr_rate_limit_lock = Lock()
+    qr_scan_attempts = {}
+    qr_checkin_attempts = {}
+    qr_rate_limit_window_seconds = 60
+    qr_scan_limit_per_window = 25
+    qr_checkin_limit_per_window = 15
+
+    def _is_rate_limited(bucket, key, limit):
+        now_ts = int(datetime.utcnow().timestamp())
+        with qr_rate_limit_lock:
+            attempts = [
+                ts for ts in bucket.get(key, []) if ts >= now_ts - qr_rate_limit_window_seconds
+            ]
+            bucket[key] = attempts
+            return len(attempts) >= limit
+
+    def _record_rate_attempt(bucket, key):
+        now_ts = int(datetime.utcnow().timestamp())
+        with qr_rate_limit_lock:
+            attempts = [
+                ts for ts in bucket.get(key, []) if ts >= now_ts - qr_rate_limit_window_seconds
+            ]
+            attempts.append(now_ts)
+            bucket[key] = attempts
 
     def _log_attendance_confirmation(conn, attendance_id, employee_id, branch_id, source, note=None):
+        confirmed_at = format_db_datetime(datetime.now())
         conn.execute(
             """
-            INSERT INTO attendance_confirm_logs(attendance_log_id, employee_id, branch_id, source, note)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO attendance_confirm_logs(attendance_log_id, employee_id, branch_id, confirmed_at, source, note)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (attendance_id, employee_id, branch_id, source, note),
+            (attendance_id, employee_id, branch_id, confirmed_at, source, note),
         )
         conn.execute(
-            "UPDATE attendance_logs SET confirmed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (attendance_id,),
+            "UPDATE attendance_logs SET confirmed_at = ? WHERE id = ?",
+            (confirmed_at, attendance_id),
         )
 
     def _ensure_attendance_qr_enabled():
@@ -59,6 +85,15 @@ def register_attendance_routes(app, deps):
         body = request.get_json(silent=True) or {}
         branch_id = body.get("branch_id")
         note = (body.get("note") or "").strip() or None
+        
+        # Manager override: có thể ghi lại custom check-in time
+        actual_check_in_time_str = (body.get("actual_check_in_time") or "").strip() or None
+        actual_check_in_dt = None
+        if actual_check_in_time_str and user["role"] == "manager":
+            try:
+                actual_check_in_dt = parse_db_datetime(actual_check_in_time_str)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid actual_check_in_time format"}), 400
 
         conn = get_conn()
         if user["role"] == "manager":
@@ -94,12 +129,35 @@ def register_attendance_routes(app, deps):
             conn.close()
             return jsonify({"error": "Please check-out current session before new check-in"}), 400
 
+        # Get shift info to calculate scheduled time
+        if actual_check_in_dt:
+            check_in_dt = actual_check_in_dt
+        else:
+            check_in_dt = datetime.now()
+        
+        scheduled_shift_start_at_str = None
+        minutes_late = 0
+        shift_row, shift_start_dt, late_deadline_dt, shift_week_start, shift_error = resolve_today_shift_for_checkin(
+            conn,
+            user["id"],
+            branch_id,
+            check_in_dt,
+        )
+        if shift_error or not shift_row:
+            conn.close()
+            return jsonify({"error": shift_error or "Bạn chưa có ca làm hôm nay"}), 400
+
+        if shift_start_dt:
+            scheduled_shift_start_at_str = format_db_datetime(shift_start_dt)
+            minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60))
+        
+        check_in_time_str = format_db_datetime(check_in_dt)
         cur = conn.execute(
             """
-            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, confirmed_at, note)
-            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, scheduled_shift_start_at, minutes_late, confirmed_at, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (user["id"], branch_id, note),
+            (user["id"], branch_id, check_in_time_str, scheduled_shift_start_at_str, minutes_late, check_in_time_str, note),
         )
         _log_attendance_confirmation(
             conn,
@@ -111,7 +169,13 @@ def register_attendance_routes(app, deps):
         )
         conn.commit()
         conn.close()
-        return jsonify({"message": "Checked in", "attendance_id": cur.lastrowid}), 201
+        return jsonify({
+            "message": "Checked in", 
+            "attendance_id": cur.lastrowid,
+            "check_in_at": check_in_time_str,
+            "scheduled_shift_start_at": scheduled_shift_start_at_str,
+            "minutes_late": minutes_late
+        }), 201
 
     @app.post("/api/attendance/confirm-open")
     def attendance_confirm_open():
@@ -175,19 +239,87 @@ def register_attendance_routes(app, deps):
         # Business rule: payroll minutes must be anchored to the actual check-in time.
         anchor_raw = open_log["check_in_at"]
         anchor_dt = parse_db_datetime(anchor_raw)
-        minutes = max(1, int((datetime.now() - anchor_dt).total_seconds() // 60))
+        now_dt = datetime.now()
+        check_out_at = format_db_datetime(now_dt)
+        minutes = max(1, int((now_dt - anchor_dt).total_seconds() // 60))
         conn.execute(
             """
             UPDATE attendance_logs
-            SET check_out_at = CURRENT_TIMESTAMP,
+            SET check_out_at = ?,
                 minutes_worked = ?
             WHERE id = ?
             """,
-            (minutes, open_log["id"]),
+            (check_out_at, minutes, open_log["id"]),
         )
         conn.commit()
         conn.close()
         return jsonify({"message": "Checked out", "minutes_worked": minutes, "minutes_anchor": "check_in_at"})
+
+    @app.get("/api/attendance/checkin-availability")
+    def attendance_checkin_availability():
+        user, error = get_user_from_token(roles={"employee", "manager"})
+        if error:
+            return error
+
+        now_dt = datetime.now()
+        conn = get_conn()
+
+        if user["role"] == "manager":
+            branch_id = user.get("branch_id")
+            if not branch_id:
+                conn.close()
+                return jsonify({"can_check_in": False, "reason": "Manager chưa được gán chi nhánh"})
+
+            shift_row, shift_start_dt, late_deadline_dt, shift_week_start, shift_error = resolve_today_shift_for_checkin(
+                conn,
+                user["id"],
+                branch_id,
+                now_dt,
+            )
+            conn.close()
+            if shift_error or not shift_row:
+                return jsonify({"can_check_in": False, "reason": shift_error or "Bạn chưa có ca làm hôm nay"})
+            return jsonify(
+                {
+                    "can_check_in": True,
+                    "branch_id": branch_id,
+                    "shift_code": shift_row["shift_code"],
+                    "shift_start_at": format_db_datetime(shift_start_dt) if shift_start_dt else None,
+                }
+            )
+
+        branch_rows = conn.execute(
+            "SELECT branch_id FROM employee_branch_access WHERE employee_id = ? ORDER BY branch_id",
+            (user["id"],),
+        ).fetchall()
+        branch_ids = [int(row["branch_id"]) for row in branch_rows]
+        if not branch_ids:
+            conn.close()
+            return jsonify({"can_check_in": False, "reason": "Bạn chưa được gán chi nhánh"})
+
+        first_reason = None
+        for branch_id in branch_ids:
+            shift_row, shift_start_dt, late_deadline_dt, shift_week_start, shift_error = resolve_today_shift_for_checkin(
+                conn,
+                user["id"],
+                branch_id,
+                now_dt,
+            )
+            if not shift_error and shift_row:
+                conn.close()
+                return jsonify(
+                    {
+                        "can_check_in": True,
+                        "branch_id": branch_id,
+                        "shift_code": shift_row["shift_code"],
+                        "shift_start_at": format_db_datetime(shift_start_dt) if shift_start_dt else None,
+                    }
+                )
+            if shift_error and not first_reason:
+                first_reason = shift_error
+
+        conn.close()
+        return jsonify({"can_check_in": False, "reason": first_reason or "Nhân viên không có ca làm, không thể check-in"})
 
     @app.get("/api/attendance/my-week")
     def attendance_my_week():
@@ -205,13 +337,22 @@ def register_attendance_routes(app, deps):
             """
             SELECT a.id,
                    a.check_in_at,
-                     a.confirmed_at,
+                   a.scheduled_shift_start_at,
+                   a.minutes_late,
+                   a.confirmed_at,
                    a.check_out_at,
                    COALESCE(a.minutes_worked, 0) AS minutes_worked,
+                   CASE
+                       WHEN a.checked_in_by_manager_id IS NOT NULL THEN 'manager_override'
+                       ELSE 'employee_self'
+                   END AS attendance_source,
                    a.note,
-                   COALESCE(b.name, '-') AS branch_name
+                   COALESCE(b.name, '-') AS branch_name,
+                   COALESCE(u.display_name, '-') AS checked_in_by_manager_name,
+                   a.manager_check_in_note
             FROM attendance_logs a
             LEFT JOIN branches b ON b.id = a.branch_id
+            LEFT JOIN users u ON u.id = a.checked_in_by_manager_id
             WHERE a.employee_id = ?
               AND a.check_in_at >= ?
               AND a.check_in_at < ?
@@ -280,6 +421,12 @@ def register_attendance_routes(app, deps):
         if error:
             return error
 
+        client_ip = get_client_ip()
+        checkin_limit_key = f"checkin:{user['id']}:{client_ip}"
+        if _is_rate_limited(qr_checkin_attempts, checkin_limit_key, qr_checkin_limit_per_window):
+            return jsonify({"error": "Bạn thao tác check-in quá nhanh. Vui lòng thử lại sau 1 phút"}), 429
+        _record_rate_attempt(qr_checkin_attempts, checkin_limit_key)
+
         body = request.get_json(silent=True) or {}
         qr_token = (body.get("qr_token") or "").strip()
         one_time_code = (body.get("one_time_code") or "").strip().upper()
@@ -317,7 +464,6 @@ def register_attendance_routes(app, deps):
             conn.close()
             return jsonify({"error": "Branch is not in employee access scope"}), 403
 
-        client_ip = get_client_ip()
         if not is_branch_ip_allowed(branch, client_ip):
             conn.close()
             return jsonify({"error": "You must connect from branch network to check in"}), 403
@@ -426,22 +572,32 @@ def register_attendance_routes(app, deps):
             conn.close()
             return jsonify({"error": "Please check-out current session before new check-in"}), 400
 
-        conn.execute(
+        updated = conn.execute(
             """
             UPDATE attendance_qr_one_time_codes
             SET consumed_at = CURRENT_TIMESTAMP,
                 consumed_by_employee_id = ?,
                 request_ip = ?
             WHERE id = ?
+              AND consumed_at IS NULL
             """,
             (user["id"], client_ip, one_time_row["id"]),
         )
+        if (updated.rowcount or 0) < 1:
+            conn.close()
+            return jsonify({"error": "One-time key đã được sử dụng. Vui lòng quét lại QR để lấy key mới"}), 400
+        
+        # Calculate scheduled shift start time and minutes late
+        scheduled_shift_start_at_str = format_db_datetime(shift_start_dt) if shift_start_dt else None
+        check_in_dt = now_dt
+        minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60)) if shift_start_dt else 0
+        
         cur = conn.execute(
             """
-            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, confirmed_at, note)
-            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, scheduled_shift_start_at, minutes_late, confirmed_at, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (user["id"], branch_id, note),
+            (user["id"], branch_id, now_raw, scheduled_shift_start_at_str, minutes_late, now_raw, note),
         )
 
         _log_attendance_confirmation(
@@ -489,6 +645,12 @@ def register_attendance_routes(app, deps):
         if error:
             return error
 
+        client_ip = get_client_ip()
+        scan_limit_key = f"scan:{user['id']}:{client_ip}"
+        if _is_rate_limited(qr_scan_attempts, scan_limit_key, qr_scan_limit_per_window):
+            return jsonify({"error": "Bạn quét QR quá nhanh. Vui lòng thử lại sau 1 phút"}), 429
+        _record_rate_attempt(qr_scan_attempts, scan_limit_key)
+
         body = request.get_json(silent=True) or {}
         qr_payload = body.get("qr_payload")
         payload_type, branch_id, one_time_code, qr_token, parse_error = parse_attendance_qr_payload(qr_payload)
@@ -516,7 +678,6 @@ def register_attendance_routes(app, deps):
             conn.close()
             return jsonify({"error": "Branch is not in employee access scope"}), 403
 
-        client_ip = get_client_ip()
         if not is_branch_ip_allowed(branch, client_ip):
             conn.close()
             return jsonify({"error": "Ban phai ket noi Wi-Fi chi nhanh de quet QR"}), 403

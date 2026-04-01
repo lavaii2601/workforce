@@ -1,5 +1,6 @@
 from flask import jsonify, request
 from werkzeug.security import generate_password_hash
+from datetime import datetime
 
 from ..services.openjarvis_service import generate_jarvis_response
 
@@ -9,6 +10,7 @@ def register_leadership_routes(app, deps):
     get_user_from_token = deps["_get_user_from_token"]
     weekly_hours_rows = deps["_weekly_hours_rows"]
     csv_response = deps["_csv_response"]
+    build_weekly_payroll_csv = deps["_build_weekly_payroll_csv"]
     create_audit_log = deps["_create_audit_log"]
     parse_pagination = deps["_parse_pagination"]
     is_valid_ipv4 = deps["_is_valid_ipv4"]
@@ -69,6 +71,86 @@ def register_leadership_routes(app, deps):
         conn.close()
         return jsonify([dict(row) for row in rows])
 
+    @app.get("/api/ceo/issues/<int:issue_id>/replies")
+    def ceo_issue_replies(issue_id):
+        _, error = get_user_from_token(roles={"ceo"})
+        if error:
+            return error
+
+        conn = get_conn()
+        issue = conn.execute(
+            """
+            SELECT id
+            FROM issue_reports
+            WHERE id = ?
+              AND (escalated_to_ceo = 1 OR status = 'escalated')
+            """,
+            (issue_id,),
+        ).fetchone()
+        if not issue:
+            conn.close()
+            return jsonify({"error": "Issue not found or not escalated to CEO"}), 404
+
+        rows = conn.execute(
+            """
+            SELECT r.id,
+                   r.issue_id,
+                   r.sender_id,
+                   r.sender_role,
+                   r.message,
+                   r.created_at,
+                   COALESCE(u.display_name, u.username, 'Unknown') AS sender_name
+            FROM issue_report_replies r
+            LEFT JOIN users u ON u.id = r.sender_id
+            WHERE r.issue_id = ?
+            ORDER BY r.id ASC
+            """,
+            (issue_id,),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
+    @app.post("/api/ceo/issues/<int:issue_id>/replies")
+    def ceo_issue_reply_create(issue_id):
+        user, error = get_user_from_token(roles={"ceo"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        message = (body.get("message") or "").strip()
+        if not message:
+            return jsonify({"error": "message is required"}), 400
+
+        conn = get_conn()
+        issue = conn.execute(
+            """
+            SELECT id
+            FROM issue_reports
+            WHERE id = ?
+              AND (escalated_to_ceo = 1 OR status = 'escalated')
+            """,
+            (issue_id,),
+        ).fetchone()
+        if not issue:
+            conn.close()
+            return jsonify({"error": "Issue not found or not escalated to CEO"}), 404
+
+        now_raw = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            """
+            INSERT INTO issue_report_replies(issue_id, sender_id, sender_role, message, created_at)
+            VALUES (?, ?, 'ceo', ?, ?)
+            """,
+            (issue_id, user["id"], message, now_raw),
+        )
+        conn.execute(
+            "UPDATE issue_reports SET updated_at = ? WHERE id = ?",
+            (now_raw, issue_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Reply posted"}), 201
+
     @app.get("/api/ceo/payroll-export.csv")
     def ceo_payroll_export():
         _, error = get_user_from_token(roles={"ceo"})
@@ -101,43 +183,10 @@ def register_leadership_routes(app, deps):
 
         rows = weekly_hours_rows(conn, week_start, branch_id=branch_id)
         conn.close()
-        csv_rows = [
-            [
-                item["employee_id"],
-                item["username"],
-                item["employee_name"],
-                item["role"],
-                item["branch_name"],
-                round(item["total_minutes"] / 60, 2),
-                item["attendance_sessions"],
-                item.get("work_dates", ""),
-                item.get("check_in_times", ""),
-                item.get("check_out_times", ""),
-                item.get("late_minutes_total", 0),
-                item.get("penalty_minutes_recommended", 0),
-                item.get("late_shortage_override_sessions", 0),
-                week_start,
-            ]
-            for item in rows
-        ]
+        headers, csv_rows = build_weekly_payroll_csv(rows, week_start)
         return csv_response(
             filename=f"payroll_{branch_label}_{week_start}.csv",
-            headers=[
-                "employee_id",
-                "username",
-                "employee_name",
-                "role",
-                "branch_scope",
-                "hours_worked",
-                "attendance_sessions",
-                "work_dates",
-                "check_in_times",
-                "check_out_times",
-                "late_minutes_total",
-                "penalty_minutes_recommended",
-                "late_shortage_override_sessions",
-                "week_start",
-            ],
+            headers=headers,
             rows=csv_rows,
         )
 
@@ -450,9 +499,20 @@ def register_leadership_routes(app, deps):
                    b.name,
                    b.location,
                    b.network_ip,
-                   (SELECT COUNT(*) FROM users u WHERE u.role = 'manager' AND u.branch_id = b.id) AS manager_count,
-                   (SELECT COUNT(DISTINCT eba.employee_id) FROM employee_branch_access eba WHERE eba.branch_id = b.id) AS employee_count
+                   COALESCE(mgr.manager_count, 0) AS manager_count,
+                   COALESCE(emp.employee_count, 0) AS employee_count
             FROM branches b
+            LEFT JOIN (
+                SELECT branch_id, COUNT(*) AS manager_count
+                FROM users
+                WHERE role = 'manager'
+                GROUP BY branch_id
+            ) mgr ON mgr.branch_id = b.id
+            LEFT JOIN (
+                SELECT branch_id, COUNT(DISTINCT employee_id) AS employee_count
+                FROM employee_branch_access
+                GROUP BY branch_id
+            ) emp ON emp.branch_id = b.id
             {where_clause}
             ORDER BY b.name
             LIMIT ? OFFSET ?

@@ -101,7 +101,7 @@
         <div class="user-card">
           <div id="sidebar-avatar" class="avatar-box">U</div>
           <div>
-            <p class="badge">Dashboard</p>
+            <p class="badge">Tổng quan</p>
             <h2 id="sidebar-role">ROLE</h2>
             <p id="sidebar-user" class="muted"></p>
           </div>
@@ -124,6 +124,7 @@
             <img id="profile-avatar-preview" class="profile-avatar-preview hidden" alt="Avatar" />
             <div id="profile-avatar-fallback" class="profile-avatar-fallback">AVT</div>
             <input id="profile-avatar-input" type="file" accept="image/*" />
+            <p class="muted">Yeu cau avatar: anh the 4x3, ro mat, phong nen don gian.</p>
           </div>
 
           <div class="field-grid">
@@ -166,23 +167,38 @@
           <div class="row">
             <input id="attendance-note" type="text" placeholder="Ghi chú (tùy chọn)" />
             <button id="btn-confirm-attendance" class="ghost">Xác nhận đang làm</button>
-            <button id="btn-check-out" class="ghost">Check-out</button>
+            <button id="btn-check-out" class="ghost">Kết thúc ca</button>
           </div>
           <div class="row">
             <input id="employee-one-time-qr-payload" type="text" placeholder="Dán nội dung QR sau khi quét" />
+            <button id="btn-open-employee-qr-camera" class="ghost" type="button">Quét bằng camera</button>
+            <button id="btn-scan-employee-qr-image" class="ghost" type="button">Quét từ ảnh QR</button>
+            <input id="employee-qr-image-input" type="file" accept="image/*" class="hidden" />
             <button id="btn-scan-one-time-qr" class="ghost">Quét QR lấy key</button>
           </div>
           <div class="row">
-            <input id="employee-one-time-random-key" type="text" placeholder="Nhập random key one-time để bắt đầu chấm công" />
+            <input id="employee-one-time-random-key" type="text" placeholder="Nhập mã xác thực một lần để bắt đầu chấm công" />
             <button id="btn-check-in-one-time" class="ghost">Xác nhận bắt đầu chấm công</button>
           </div>
           <p id="employee-one-time-scan-result" class="muted"></p>
-          <p class="muted">Nhân viên kết nối Wi-Fi chi nhánh, quét QR để lấy random key rồi nhập key để bắt đầu chấm công.</p>
+          <p class="muted">Nhân viên kết nối Wi-Fi chi nhánh, quét QR để lấy mã xác thực một lần rồi nhập mã để bắt đầu chấm công.</p>
           <div id="employee-attendance-list" class="list"></div>
         </div>
 
+        <section id="employee-qr-camera-modal" class="profile-required hidden" aria-live="polite">
+          <div class="profile-required-card employee-qr-camera-card">
+            <h3>Quét QR bằng camera</h3>
+            <p id="employee-qr-camera-status" class="muted">Đưa mã QR vào khung camera để hệ thống tự nhận.</p>
+            <video id="employee-qr-camera-video" class="employee-qr-camera-video" autoplay playsinline muted></video>
+            <div class="row compact">
+              <button id="btn-close-employee-qr-camera" class="ghost" type="button">Đóng camera</button>
+            </div>
+          </div>
+        </section>
+
         <div id="route-employee-shifts" class="panel route-view hidden">
           <h3>Nhân viên - Chọn ca làm trong tuần</h3>
+          <p id="employee-shifts-lock-note" class="muted"></p>
           <div id="employee-shifts-summary" class="summary-strip"></div>
           <div class="schedule-col compact">
             <h4>Cách đăng ký ca</h4>
@@ -273,16 +289,16 @@
             <input id="manager-attendance-note" type="text" placeholder="Ghi chú" />
             <button id="btn-manager-check-in">Check-in</button>
             <button id="btn-manager-confirm-attendance" class="ghost">Xác nhận đang làm</button>
-            <button id="btn-manager-check-out" class="ghost">Check-out</button>
+            <button id="btn-manager-check-out" class="ghost">Kết thúc ca</button>
           </div>
           <div class="schedule-col compact">
-            <h4>QR chấm công one-time</h4>
-            <p class="muted">Nhân viên quét QR để lấy key one-time rồi nhập key bắt đầu chấm công.</p>
+            <h4>QR chấm công một lần</h4>
+            <p class="muted">Nhân viên quét QR để lấy mã xác thực một lần rồi nhập mã để bắt đầu chấm công.</p>
             <div class="row qr-image-row">
               <img id="manager-attendance-one-time-qr-image" class="qr-image hidden" alt="QR one-time chấm công" />
             </div>
             <div class="row">
-              <button id="btn-manager-generate-one-time-qr" class="ghost">Tao QR One-time</button>
+              <button id="btn-manager-generate-one-time-qr" class="ghost">Tạo QR một lần</button>
             </div>
             <p id="manager-attendance-one-time-meta" class="muted"></p>
           </div>
@@ -399,11 +415,21 @@
 
         <div id="route-manager-issues" class="panel route-view hidden">
           <h3>Quản lý - Tiếp nhận và báo cáo cấp cao</h3>
+          <div class="field-grid">
+            <label>Tiêu đề báo cáo gửi CEO
+              <input id="manager-ceo-report-title" type="text" placeholder="VD: Thiếu nhân sự giờ cao điểm" />
+            </label>
+            <label>Nội dung báo cáo
+              <textarea id="manager-ceo-report-details" rows="3" placeholder="Mô tả tình hình, mức độ ảnh hưởng, đề xuất hỗ trợ"></textarea>
+            </label>
+          </div>
+          <button id="btn-submit-manager-ceo-report" class="ghost">Gửi báo cáo lên CEO</button>
           <div id="manager-issues-list" class="list"></div>
         </div>
 
         <div id="route-manager-employees" class="panel route-view hidden">
           <h3>Quản lý - Thêm nhân viên mới và xem thông tin cá nhân</h3>
+          <p class="muted">Luu y: avatar nhan vien su dung anh the 4x3.</p>
           <div class="field-grid manager-employee-form">
             <label>Tên đăng nhập
               <input id="manager-new-username" type="text" />

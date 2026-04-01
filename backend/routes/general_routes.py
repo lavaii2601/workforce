@@ -6,6 +6,9 @@ from flask import jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
+MAX_AVATAR_DATA_URL_LENGTH = 350_000
+
+
 def register_general_routes(app, deps):
     get_conn = deps["get_conn"]
     get_user_from_token = deps["_get_user_from_token"]
@@ -277,6 +280,8 @@ def register_general_routes(app, deps):
             return jsonify({"error": "avatar_data_url is required"}), 400
         if not avatar_data_url.startswith("data:image/"):
             return jsonify({"error": "avatar_data_url must be a valid image data URL"}), 400
+        if len(avatar_data_url) > MAX_AVATAR_DATA_URL_LENGTH:
+            return jsonify({"error": "Avatar image is too large. Please choose a smaller image."}), 400
 
         conn = get_conn()
         conn.execute(

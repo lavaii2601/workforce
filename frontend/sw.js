@@ -1,4 +1,4 @@
-const CACHE_NAME = "workforce-hub-v1";
+const CACHE_NAME = "workforce-hub-v2";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
@@ -31,6 +31,15 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") {
+    return;
+  }
+
+  const requestUrl = new URL(event.request.url);
+  const hasAuthHeader = event.request.headers.has("Authorization");
+  const isApiRequest = requestUrl.pathname.startsWith("/api/");
+
+  if (hasAuthHeader || isApiRequest) {
+    event.respondWith(fetch(event.request));
     return;
   }
 

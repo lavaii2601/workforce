@@ -1,8 +1,9 @@
 import re
 import secrets
+import base64
 from datetime import datetime, timedelta
 
-from flask import jsonify, request
+from flask import jsonify, request, Response
 from werkzeug.security import generate_password_hash
 
 
@@ -18,6 +19,7 @@ def register_operations_routes(app, deps):
     upsert_shift_attendance_mark = deps["_upsert_shift_attendance_mark"]
     weekly_hours_rows = deps["_weekly_hours_rows"]
     csv_response = deps["_csv_response"]
+    build_weekly_payroll_csv = deps["_build_weekly_payroll_csv"]
     manager_can_manage_employee = deps["_manager_can_manage_employee"]
 
     shift_code_set = deps["SHIFT_CODE_SET"]
@@ -125,6 +127,46 @@ def register_operations_routes(app, deps):
         conn.close()
         return jsonify([dict(row) for row in rows])
 
+    @app.get("/api/issues/my/<int:issue_id>/replies")
+    def my_issue_replies(issue_id):
+        user, error = get_user_from_token(roles={"employee", "manager"})
+        if error:
+            return error
+
+        conn = get_conn()
+        issue = conn.execute(
+            """
+            SELECT id
+            FROM issue_reports
+            WHERE id = ?
+              AND reporter_id = ?
+            LIMIT 1
+            """,
+            (issue_id, user["id"]),
+        ).fetchone()
+        if not issue:
+            conn.close()
+            return jsonify({"error": "Issue not found or access denied"}), 404
+
+        rows = conn.execute(
+            """
+            SELECT r.id,
+                   r.issue_id,
+                   r.sender_id,
+                   r.sender_role,
+                   r.message,
+                   r.created_at,
+                   COALESCE(u.display_name, '-') AS sender_name
+            FROM issue_report_replies r
+            LEFT JOIN users u ON u.id = r.sender_id
+            WHERE r.issue_id = ?
+            ORDER BY r.created_at ASC, r.id ASC
+            """,
+            (issue_id,),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
     @app.get("/api/employee/branches")
     def employee_branches():
         user, error = get_user_from_token(roles={"employee"})
@@ -169,7 +211,7 @@ def register_operations_routes(app, deps):
                    g.created_by_employee_id,
                    g.note,
                    g.created_at,
-                   COUNT(m.employee_id) AS member_count
+                                     COUNT(DISTINCT m.employee_id) AS member_count
             FROM shift_registration_groups g
             JOIN branches b ON b.id = g.branch_id
             LEFT JOIN shift_registration_group_members m ON m.group_id = g.id
@@ -183,8 +225,36 @@ def register_operations_routes(app, deps):
             """,
             (week_start, user["id"]),
         ).fetchall()
+
+        group_ids = [int(row["id"]) for row in rows]
+        members_by_group = {}
+        if group_ids:
+            placeholders = ",".join(["?"] * len(group_ids))
+            member_rows = conn.execute(
+                f"""
+                SELECT m.group_id,
+                       u.display_name AS member_name
+                FROM shift_registration_group_members m
+                JOIN users u ON u.id = m.employee_id
+                WHERE m.group_id IN ({placeholders})
+                ORDER BY u.display_name
+                """,
+                tuple(group_ids),
+            ).fetchall()
+            for member_row in member_rows:
+                group_id = int(member_row["group_id"])
+                members_by_group.setdefault(group_id, []).append(member_row["member_name"])
+
         conn.close()
-        return jsonify([dict(row) for row in rows])
+
+        payload = []
+        for row in rows:
+            item = dict(row)
+            members = members_by_group.get(int(item["id"]), [])
+            item["members"] = members
+            item["members_text"] = ", ".join(members)
+            payload.append(item)
+        return jsonify(payload)
 
     @app.get("/api/manager/registration-groups")
     def manager_registration_groups_get():
@@ -416,6 +486,19 @@ def register_operations_routes(app, deps):
             return jsonify({"error": "selections must be a list"}), 400
 
         conn = get_conn()
+        existing_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM shift_preferences WHERE employee_id = ? AND week_start = ?",
+            (user["id"], week_start),
+        ).fetchone()["c"]
+        if existing_count > 0:
+            conn.close()
+            return jsonify(
+                {
+                    "error": "Bạn đã chốt đăng ký ca cho tuần này. Vui lòng đợi sang tuần mới để chỉnh sửa.",
+                    "locked": True,
+                }
+            ), 409
+
         allowed_branch_ids = {
             row["branch_id"]
             for row in conn.execute(
@@ -596,9 +679,63 @@ def register_operations_routes(app, deps):
             """,
             (user["id"], week_start),
         ).fetchall()
+
+        row_items = [dict(row) for row in rows]
+        team_key_to_members = {}
+        team_keys = []
+        for item in row_items:
+            if item.get("registration_type") != "group" or not item.get("group_code"):
+                continue
+            team_key = (
+                item["week_start"],
+                int(item["branch_id"]),
+                int(item["day_of_week"]),
+                item["shift_code"],
+                item["group_code"],
+            )
+            if team_key not in team_key_to_members:
+                team_key_to_members[team_key] = []
+                team_keys.append(team_key)
+
+        for team_key in team_keys:
+            team_rows = conn.execute(
+                """
+                SELECT u.display_name AS member_name
+                FROM weekly_schedule ws
+                JOIN users u ON u.id = ws.employee_id
+                WHERE ws.week_start = ?
+                  AND ws.branch_id = ?
+                  AND ws.day_of_week = ?
+                  AND ws.shift_code = ?
+                  AND ws.registration_type = 'group'
+                  AND ws.group_code = ?
+                ORDER BY u.display_name
+                """,
+                team_key,
+            ).fetchall()
+            team_key_to_members[team_key] = [team_row["member_name"] for team_row in team_rows]
+
         conn.close()
 
-        return jsonify([dict(row) for row in rows])
+        for item in row_items:
+            if item.get("registration_type") == "group" and item.get("group_code"):
+                team_key = (
+                    item["week_start"],
+                    int(item["branch_id"]),
+                    int(item["day_of_week"]),
+                    item["shift_code"],
+                    item["group_code"],
+                )
+                members = team_key_to_members.get(team_key, [])
+                item["team_members"] = members
+                item["team_members_text"] = ", ".join(members)
+                item["team_size"] = len(members)
+            else:
+                item["team_members"] = []
+                item["team_members_text"] = ""
+                item["team_size"] = 0
+
+        return jsonify(row_items)
 
     @app.get("/api/manager/preferences")
     def manager_view_preferences():
@@ -1038,6 +1175,15 @@ def register_operations_routes(app, deps):
         body = request.get_json(silent=True) or {}
         schedule_id = body.get("schedule_id")
         note = (body.get("note") or "").strip() or "Quan ly xac nhan vao ca do thieu nhan su"
+        
+        # Manager can specify actual check-in time (e.g., when employee arrives late)
+        actual_check_in_time_str = (body.get("actual_check_in_time") or "").strip() or None
+        actual_check_in_dt = None
+        if actual_check_in_time_str:
+            try:
+                actual_check_in_dt = parse_db_datetime(actual_check_in_time_str)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid actual_check_in_time format"}), 400
 
         try:
             schedule_id = int(schedule_id)
@@ -1062,7 +1208,7 @@ def register_operations_routes(app, deps):
         # Ensure there is an open attendance session anchored at real override time.
         open_log = conn.execute(
             """
-            SELECT id
+            SELECT id, check_in_at
             FROM attendance_logs
             WHERE employee_id = ?
               AND branch_id = ?
@@ -1073,16 +1219,60 @@ def register_operations_routes(app, deps):
             (schedule["employee_id"], schedule["branch_id"]),
         ).fetchone()
 
-        attendance_log_id = open_log["id"] if open_log else None
+        attendance_log_id = None
+        if open_log:
+            schedule_day_dt = datetime.strptime(schedule["week_start"], "%Y-%m-%d") + timedelta(
+                days=int(schedule["day_of_week"]) - 1
+            )
+            try:
+                open_check_in_dt = parse_db_datetime(open_log["check_in_at"])
+            except (TypeError, ValueError):
+                open_check_in_dt = None
+
+            if open_check_in_dt and open_check_in_dt.date() == schedule_day_dt.date():
+                # Reuse same-day open session as employee's active check-in.
+                attendance_log_id = open_log["id"]
+            else:
+                # Auto-close stale open session so manager override can create a fresh check-in for this shift.
+                conn.execute(
+                    """
+                    UPDATE attendance_logs
+                    SET check_out_at = ?,
+                        minutes_worked = COALESCE(minutes_worked, 1)
+                    WHERE id = ?
+                    """,
+                    (format_db_datetime(datetime.now()), open_log["id"]),
+                )
+
         if not attendance_log_id:
+            # Calculate scheduled shift start time
+            shift_start_dt = shift_start_datetime(schedule["week_start"], schedule["day_of_week"], schedule["shift_code"])
+            scheduled_shift_start_at_str = format_db_datetime(shift_start_dt) if shift_start_dt else None
+            
+            # Calculate minutes late
+            check_in_dt = actual_check_in_dt if actual_check_in_dt else datetime.now()
+            minutes_late = 0
+            if shift_start_dt:
+                minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60))
+            
             cur = conn.execute(
                 """
-                INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, confirmed_at, note)
-                VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+                INSERT INTO attendance_logs(
+                    employee_id, branch_id, check_in_at, confirmed_at, 
+                    scheduled_shift_start_at, minutes_late, 
+                    checked_in_by_manager_id, manager_check_in_note, note
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     schedule["employee_id"],
                     schedule["branch_id"],
+                    format_db_datetime(check_in_dt),
+                    format_db_datetime(check_in_dt),
+                    scheduled_shift_start_at_str,
+                    minutes_late,
+                    user["id"],
+                    note,
                     "Manager override - thieu nhan su",
                 ),
             )
@@ -1104,7 +1294,7 @@ def register_operations_routes(app, deps):
         conn.commit()
         conn.close()
 
-        return jsonify({"message": "Đã cập nhật trạng thái: đã đi làm"})
+        return jsonify({"message": "Đã cập nhật trạng thái: đã đi làm", "attendance_log_id": attendance_log_id})
 
     @app.get("/api/manager/self-preferences")
     def manager_self_preferences_get():
@@ -1130,6 +1320,31 @@ def register_operations_routes(app, deps):
         ).fetchall()
         conn.close()
         return jsonify([dict(row) for row in rows])
+
+    @app.get("/api/employee/preferences-lock")
+    def employee_preferences_lock():
+        user, error = get_user_from_token(roles={"employee"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        saved_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM shift_preferences WHERE employee_id = ? AND week_start = ?",
+            (user["id"], week_start),
+        ).fetchone()["c"]
+        conn.close()
+
+        return jsonify(
+            {
+                "week_start": week_start,
+                "locked": saved_count > 0,
+                "saved_count": int(saved_count),
+            }
+        )
 
     @app.put("/api/manager/self-preferences")
     def manager_self_preferences_put():
@@ -1257,6 +1472,113 @@ def register_operations_routes(app, deps):
         conn.close()
         return jsonify([dict(row) for row in rows])
 
+    @app.post("/api/manager/issues/report-ceo")
+    def manager_report_ceo():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        title = (body.get("title") or "").strip()
+        details = (body.get("details") or "").strip()
+        if not title or not details:
+            return jsonify({"error": "title and details are required"}), 400
+
+        conn = get_conn()
+        cur = conn.execute(
+            """
+            INSERT INTO issue_reports(
+                reporter_id,
+                reporter_role,
+                branch_id,
+                title,
+                details,
+                status,
+                escalated_to_ceo
+            )
+            VALUES (?, 'manager', ?, ?, ?, 'escalated', 1)
+            """,
+            (user["id"], user["branch_id"], title, details),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Manager report sent to CEO", "issue_id": cur.lastrowid}), 201
+
+    @app.get("/api/manager/issues/<int:issue_id>/replies")
+    def manager_issue_replies(issue_id):
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        conn = get_conn()
+        issue = conn.execute(
+            "SELECT id, branch_id FROM issue_reports WHERE id = ?",
+            (issue_id,),
+        ).fetchone()
+        if not issue:
+            conn.close()
+            return jsonify({"error": "Issue not found"}), 404
+        if int(issue["branch_id"] or 0) != int(user["branch_id"] or 0):
+            conn.close()
+            return jsonify({"error": "Forbidden for this branch"}), 403
+
+        rows = conn.execute(
+            """
+            SELECT r.id,
+                   r.issue_id,
+                   r.sender_id,
+                   r.sender_role,
+                   r.message,
+                   r.created_at,
+                   COALESCE(u.display_name, u.username, 'Unknown') AS sender_name
+            FROM issue_report_replies r
+            LEFT JOIN users u ON u.id = r.sender_id
+            WHERE r.issue_id = ?
+            ORDER BY r.id ASC
+            """,
+            (issue_id,),
+        ).fetchall()
+        conn.close()
+        return jsonify([dict(row) for row in rows])
+
+    @app.post("/api/manager/issues/<int:issue_id>/replies")
+    def manager_issue_reply_create(issue_id):
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        message = (body.get("message") or "").strip()
+        if not message:
+            return jsonify({"error": "message is required"}), 400
+
+        conn = get_conn()
+        issue = conn.execute(
+            "SELECT id, branch_id FROM issue_reports WHERE id = ?",
+            (issue_id,),
+        ).fetchone()
+        if not issue:
+            conn.close()
+            return jsonify({"error": "Issue not found"}), 404
+        if int(issue["branch_id"] or 0) != int(user["branch_id"] or 0):
+            conn.close()
+            return jsonify({"error": "Forbidden for this branch"}), 403
+
+        conn.execute(
+            """
+            INSERT INTO issue_report_replies(issue_id, sender_id, sender_role, message, created_at)
+            VALUES (?, ?, 'manager', ?, ?)
+            """,
+            (issue_id, user["id"], message, format_db_datetime(datetime.now())),
+        )
+        conn.execute(
+            "UPDATE issue_reports SET updated_at = ? WHERE id = ?",
+            (format_db_datetime(datetime.now()), issue_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"message": "Reply posted"}), 201
+
     @app.put("/api/manager/issues/<int:issue_id>")
     def manager_issue_update(issue_id):
         user, error = get_user_from_token(roles={"manager"})
@@ -1312,43 +1634,10 @@ def register_operations_routes(app, deps):
         conn = get_conn()
         rows = weekly_hours_rows(conn, week_start, branch_id=user["branch_id"])
         conn.close()
-        csv_rows = [
-            [
-                item["employee_id"],
-                item["username"],
-                item["employee_name"],
-                item["role"],
-                item["branch_name"],
-                round(item["total_minutes"] / 60, 2),
-                item["attendance_sessions"],
-                item.get("work_dates", ""),
-                item.get("check_in_times", ""),
-                item.get("check_out_times", ""),
-                item.get("late_minutes_total", 0),
-                item.get("penalty_minutes_recommended", 0),
-                item.get("late_shortage_override_sessions", 0),
-                week_start,
-            ]
-            for item in rows
-        ]
+        headers, csv_rows = build_weekly_payroll_csv(rows, week_start)
         return csv_response(
             filename=f"payroll_branch_{user['branch_id']}_{week_start}.csv",
-            headers=[
-                "employee_id",
-                "username",
-                "employee_name",
-                "role",
-                "branch_name",
-                "hours_worked",
-                "attendance_sessions",
-                "work_dates",
-                "check_in_times",
-                "check_out_times",
-                "late_minutes_total",
-                "penalty_minutes_recommended",
-                "late_shortage_override_sessions",
-                "week_start",
-            ],
+            headers=headers,
             rows=csv_rows,
         )
 
@@ -1366,7 +1655,6 @@ def register_operations_routes(app, deps):
                    u.username,
                    u.display_name,
                    u.full_name,
-                   u.avatar_data_url,
                    u.phone_number,
                    u.address,
                    u.date_of_birth,
@@ -1400,7 +1688,6 @@ def register_operations_routes(app, deps):
                      u.username,
                      u.display_name,
                      u.full_name,
-                     u.avatar_data_url,
                      u.phone_number,
                      u.address,
                      u.date_of_birth,
@@ -1432,6 +1719,7 @@ def register_operations_routes(app, deps):
                 if branch_id.strip().isdigit()
             ]
             item["contact_ready"] = bool((item.get("phone_number") or "").strip())
+            item["avatar_url"] = f"/api/manager/employees/{item['id']}/avatar"
             employees.append(item)
 
         return jsonify(
@@ -1441,6 +1729,46 @@ def register_operations_routes(app, deps):
                 "default_branch_ids": [user["branch_id"]],
             }
         )
+
+    @app.get("/api/manager/employees/<int:employee_id>/avatar")
+    def manager_employee_avatar(employee_id):
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        conn = get_conn()
+        if not manager_can_manage_employee(conn, user["branch_id"], employee_id):
+            conn.close()
+            return jsonify({"error": "You can only view avatars for employees in your branch scope"}), 403
+
+        row = conn.execute(
+            "SELECT avatar_data_url FROM users WHERE id = ? AND role = 'employee'",
+            (employee_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"error": "User not found"}), 404
+
+        data_url = (row["avatar_data_url"] or "").strip()
+        if not data_url:
+            return ("", 404)
+
+        match = re.match(r"^data:image/([a-zA-Z0-9.+-]+);base64,(.+)$", data_url)
+        if not match:
+            return ("", 404)
+
+        image_format = match.group(1).lower()
+        image_b64 = match.group(2)
+        try:
+            image_bytes = base64.b64decode(image_b64, validate=True)
+        except (ValueError, base64.binascii.Error):
+            return ("", 404)
+
+        response = Response(image_bytes, mimetype=f"image/{image_format}")
+        response.headers["Cache-Control"] = "private, no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.post("/api/manager/employees")
     def manager_create_employee():
