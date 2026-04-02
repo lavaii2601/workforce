@@ -76,6 +76,20 @@ const managerStaffingRules = new Map();
 const PROFILE_AVATAR_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const PROFILE_AVATAR_MAX_DATA_URL_LENGTH = 350000;
 const PROFILE_AVATAR_MAX_DIMENSION = 640;
+const API_MESSAGE_REPLACEMENTS = [
+  ["Request failed", "Yêu cầu thất bại"],
+  ["Missing access token", "Thiếu mã truy cập"],
+  ["Invalid or expired session", "Phiên đăng nhập không hợp lệ hoặc đã hết hạn"],
+  ["Please check-out current session before new check-in", "Vui lòng check-out ca hiện tại trước khi check-in mới"],
+  ["No open attendance session to check-out", "Không có phiên chấm công đang mở để check-out"],
+  ["No open attendance session to confirm", "Không có phiên chấm công đang mở để xác nhận"],
+  ["Invalid, consumed, or expired one-time QR code", "Mã QR một lần không hợp lệ, đã dùng hoặc đã hết hạn"],
+  ["Invalid branch for attendance", "Chi nhánh chấm công không hợp lệ"],
+  ["No branch assigned for this employee", "Nhân viên chưa được gán chi nhánh"],
+  ["Branch is not in employee access scope", "Chi nhánh không nằm trong phạm vi được phép"],
+  ["User not found", "Không tìm thấy người dùng"],
+  ["username already exists", "Tên đăng nhập đã tồn tại"],
+];
 
 const ROUTES = {
   employee: [
@@ -127,21 +141,7 @@ function issueStatusLabel(value) {
 
 function localizeApiMessage(message) {
   let text = String(message || "").trim();
-  const replacements = [
-    ["Request failed", "Yêu cầu thất bại"],
-    ["Missing access token", "Thiếu mã truy cập"],
-    ["Invalid or expired session", "Phiên đăng nhập không hợp lệ hoặc đã hết hạn"],
-    ["Please check-out current session before new check-in", "Vui lòng check-out ca hiện tại trước khi check-in mới"],
-    ["No open attendance session to check-out", "Không có phiên chấm công đang mở để check-out"],
-    ["No open attendance session to confirm", "Không có phiên chấm công đang mở để xác nhận"],
-    ["Invalid, consumed, or expired one-time QR code", "Mã QR một lần không hợp lệ, đã dùng hoặc đã hết hạn"],
-    ["Invalid branch for attendance", "Chi nhánh chấm công không hợp lệ"],
-    ["No branch assigned for this employee", "Nhân viên chưa được gán chi nhánh"],
-    ["Branch is not in employee access scope", "Chi nhánh không nằm trong phạm vi được phép"],
-    ["User not found", "Không tìm thấy người dùng"],
-    ["username already exists", "Tên đăng nhập đã tồn tại"],
-  ];
-  replacements.forEach(([from, to]) => {
+  API_MESSAGE_REPLACEMENTS.forEach(([from, to]) => {
     text = text.replaceAll(from, to);
   });
   return text;
@@ -346,14 +346,18 @@ function showToast(message, isError = false) {
 
 async function api(path, options = {}) {
   const headers = {
-    "Content-Type": "application/json",
     ...(options.headers || {}),
   };
+  const method = String(options.method || "GET").toUpperCase();
+  const hasBody = options.body !== undefined && options.body !== null;
+  if (hasBody && !headers["Content-Type"] && !headers["content-type"]) {
+    headers["Content-Type"] = "application/json";
+  }
   if (state.token) {
     headers.Authorization = `Bearer ${state.token}`;
   }
 
-  const res = await fetch(path, { ...options, headers });
+  const res = await fetch(path, { ...options, method, headers });
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
     const rawError = payload.error || `Yêu cầu thất bại: ${res.status}`;

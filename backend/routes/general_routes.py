@@ -90,7 +90,8 @@ def register_general_routes(app, deps):
             record_login_failure(client_ip, username)
             return jsonify({"error": "Invalid username or password"}), 401
 
-        if is_stateless_session_enabled():
+        stateless_enabled = is_stateless_session_enabled()
+        if stateless_enabled:
             token, expires_ts = build_stateless_session_token(user["id"])
             expires_at = datetime.utcfromtimestamp(expires_ts).strftime("%Y-%m-%d %H:%M:%S")
         else:
@@ -101,7 +102,7 @@ def register_general_routes(app, deps):
 
         token_hash = hash_session_token(token)
         conn.execute("DELETE FROM auth_sessions WHERE expires_at <= CURRENT_TIMESTAMP")
-        if not is_stateless_session_enabled():
+        if not stateless_enabled:
             conn.execute(
                 "INSERT INTO auth_sessions(user_id, token, expires_at) VALUES (?, ?, ?)",
                 (user["id"], token_hash, expires_at),
@@ -240,15 +241,16 @@ def register_general_routes(app, deps):
         user, error = get_user_from_token(required=True)
         if error:
             return error
+        profile_completed = is_profile_completed(user)
         payload = {
             "id": user["id"],
             "username": user["username"],
             "role": user["role"],
             "display_name": user["display_name"],
             "profile": build_profile_payload(user),
-            "profile_completed": is_profile_completed(user),
+            "profile_completed": profile_completed,
             "needs_profile_completion": (
-                user["role"] in profile_required_roles and not is_profile_completed(user)
+                user["role"] in profile_required_roles and not profile_completed
             ),
         }
         return jsonify(payload)

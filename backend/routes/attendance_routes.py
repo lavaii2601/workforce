@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
+from collections import deque
 from threading import Lock
+from typing import Deque, Dict
 
 from flask import jsonify, request
 
@@ -31,23 +33,27 @@ def register_attendance_routes(app, deps):
     qr_scan_limit_per_window = 25
     qr_checkin_limit_per_window = 15
 
-    def _is_rate_limited(bucket, key, limit):
+    def _prune_bucket_window(bucket: Dict[str, Deque[int]], key: str, now_ts: int) -> Deque[int]:
+        attempts = bucket.get(key)
+        if attempts is None:
+            attempts = deque()
+            bucket[key] = attempts
+        window_start = now_ts - qr_rate_limit_window_seconds
+        while attempts and attempts[0] < window_start:
+            attempts.popleft()
+        return attempts
+
+    def _is_rate_limited(bucket: Dict[str, Deque[int]], key: str, limit: int) -> bool:
         now_ts = int(datetime.utcnow().timestamp())
         with qr_rate_limit_lock:
-            attempts = [
-                ts for ts in bucket.get(key, []) if ts >= now_ts - qr_rate_limit_window_seconds
-            ]
-            bucket[key] = attempts
+            attempts = _prune_bucket_window(bucket, key, now_ts)
             return len(attempts) >= limit
 
-    def _record_rate_attempt(bucket, key):
+    def _record_rate_attempt(bucket: Dict[str, Deque[int]], key: str) -> None:
         now_ts = int(datetime.utcnow().timestamp())
         with qr_rate_limit_lock:
-            attempts = [
-                ts for ts in bucket.get(key, []) if ts >= now_ts - qr_rate_limit_window_seconds
-            ]
+            attempts = _prune_bucket_window(bucket, key, now_ts)
             attempts.append(now_ts)
-            bucket[key] = attempts
 
     def _log_attendance_confirmation(conn, attendance_id, employee_id, branch_id, source, note=None):
         confirmed_at = format_db_datetime(datetime.now())

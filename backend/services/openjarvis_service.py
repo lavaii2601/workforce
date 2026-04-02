@@ -100,18 +100,32 @@ def _hours_by_employee_from_attendance(conn, week_start):
     return result
 
 
-def _absence_streak_weeks(conn, employee_id, candidate_weeks):
+def _build_employee_schedule_presence_map(conn, candidate_weeks):
+    if not candidate_weeks:
+        return {}
+
+    placeholders = ",".join(["?"] * len(candidate_weeks))
+    rows = conn.execute(
+        f"""
+        SELECT employee_id, week_start
+        FROM weekly_schedule
+        WHERE week_start IN ({placeholders})
+        GROUP BY employee_id, week_start
+        """,
+        tuple(candidate_weeks),
+    ).fetchall()
+
+    presence_map = {}
+    for row in rows:
+        employee_id = row["employee_id"]
+        presence_map.setdefault(employee_id, set()).add(row["week_start"])
+    return presence_map
+
+
+def _absence_streak_weeks(employee_weeks, candidate_weeks):
     streak = 0
     for week_start in candidate_weeks:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS c
-            FROM weekly_schedule
-            WHERE employee_id = ? AND week_start = ?
-            """,
-            (employee_id, week_start),
-        ).fetchone()
-        if row["c"] == 0:
+        if week_start not in employee_weeks:
             streak += 1
         else:
             break
@@ -137,6 +151,7 @@ def generate_hr_anomaly_report(conn, question):
         "SELECT week_start FROM weekly_schedule GROUP BY week_start ORDER BY week_start DESC LIMIT 4"
     ).fetchall()
     candidate_weeks = [row["week_start"] for row in recent_weeks]
+    employee_presence_map = _build_employee_schedule_presence_map(conn, candidate_weeks)
 
     low_hours = []
     long_absence = []
@@ -154,7 +169,7 @@ def generate_hr_anomaly_report(conn, question):
                 )
             )
 
-        streak = _absence_streak_weeks(conn, employee_id, candidate_weeks)
+        streak = _absence_streak_weeks(employee_presence_map.get(employee_id, set()), candidate_weeks)
         if streak >= 2:
             long_absence.append((stats["employee_name"], streak))
 
