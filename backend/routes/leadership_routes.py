@@ -233,6 +233,9 @@ def register_leadership_routes(app, deps):
             if text:
                 history.append({"role": role, "content": text})
 
+        if history and history[-1]["role"] == "user" and history[-1]["content"] == message:
+            history.pop()
+
         jarvis_message = generate_jarvis_response(conn, message, chat_history=history)
         conn.execute(
             """
@@ -479,8 +482,8 @@ def register_leadership_routes(app, deps):
         where_clause = ""
         params = []
         if query:
-            where_clause = "WHERE LOWER(b.name) LIKE ?"
-            params.append(f"%{query.lower()}%")
+            where_clause = "WHERE b.name LIKE ? COLLATE NOCASE"
+            params.append(f"%{query}%")
 
         conn = get_conn()
         total = conn.execute(
@@ -644,41 +647,40 @@ def register_leadership_routes(app, deps):
             conn.close()
             return jsonify({"error": "Branch not found"}), 404
 
-        employee_rows = conn.execute(
+        member_rows = conn.execute(
             """
             SELECT u.id,
                    u.username,
                    u.display_name,
-                   u.is_active
+                   u.is_active,
+                   u.role
             FROM users u
-            JOIN employee_branch_access eba ON eba.employee_id = u.id
-            WHERE u.role = 'employee'
-              AND eba.branch_id = ?
-            ORDER BY u.display_name
+            LEFT JOIN employee_branch_access eba
+                   ON eba.employee_id = u.id
+                  AND eba.branch_id = ?
+            WHERE (u.role = 'manager' AND u.branch_id = ?)
+               OR (u.role = 'employee' AND eba.employee_id IS NOT NULL)
+            ORDER BY u.role, u.display_name
             """,
-            (branch_id,),
-        ).fetchall()
-
-        manager_rows = conn.execute(
-            """
-            SELECT u.id,
-                   u.username,
-                   u.display_name,
-                   u.is_active
-            FROM users u
-            WHERE u.role = 'manager'
-              AND u.branch_id = ?
-            ORDER BY u.display_name
-            """,
-            (branch_id,),
+            (branch_id, branch_id),
         ).fetchall()
         conn.close()
+
+        managers = []
+        employees = []
+        for row in member_rows:
+            item = dict(row)
+            item.pop("role", None)
+            if row["role"] == "manager":
+                managers.append(item)
+            else:
+                employees.append(item)
 
         return jsonify(
             {
                 "branch": dict(branch),
-                "managers": [dict(row) for row in manager_rows],
-                "employees": [dict(row) for row in employee_rows],
+                "managers": managers,
+                "employees": employees,
             }
         )
 

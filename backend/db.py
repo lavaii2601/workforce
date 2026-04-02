@@ -507,6 +507,9 @@ def _init_db_inner():
         CREATE INDEX IF NOT EXISTS idx_weekly_schedule_employee_week
         ON weekly_schedule(employee_id, week_start);
 
+        CREATE INDEX IF NOT EXISTS idx_weekly_schedule_group_week_branch
+        ON weekly_schedule(week_start, branch_id, registration_type, group_code, day_of_week, shift_code);
+
         CREATE INDEX IF NOT EXISTS idx_auth_sessions_token_expiry
         ON auth_sessions(token, expires_at);
 

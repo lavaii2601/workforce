@@ -529,15 +529,6 @@ def register_attendance_routes(app, deps):
             conn.close()
             return jsonify({"error": "Invalid, consumed, or expired one-time QR code"}), 400
 
-        try:
-            expires_at_dt = parse_db_datetime(one_time_row["expires_at"])
-        except (TypeError, ValueError):
-            conn.close()
-            return jsonify({"error": "One-time key không hợp lệ"}), 400
-        if now_dt > expires_at_dt:
-            conn.close()
-            return jsonify({"error": "One-time key đã hết hạn"}), 400
-
         if now_dt > late_deadline_dt:
             upsert_shift_attendance_mark(
                 conn,
@@ -755,18 +746,11 @@ def register_attendance_routes(app, deps):
         if not one_time_row:
             return jsonify({"error": "QR one-time da het han hoac da duoc su dung"}), 400
 
-        try:
-            expires_at_dt = parse_db_datetime(one_time_row["expires_at"])
-        except (TypeError, ValueError):
-            return jsonify({"error": "QR one-time da het han hoac da duoc su dung"}), 400
-        if datetime.now() > expires_at_dt:
-            return jsonify({"error": "QR one-time da het han hoac da duoc su dung"}), 400
-
         return jsonify(
             {
                 "branch_id": branch_id,
                 "qr_token": qr_token,
                 "random_key": one_time_code,
-                "expires_at": format_db_datetime(expires_at_dt),
+                "expires_at": one_time_row["expires_at"],
             }
         )

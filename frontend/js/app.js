@@ -2,6 +2,7 @@ const state = {
   token: localStorage.getItem("wm_token"),
   currentUser: null,
   shifts: [],
+  shiftByCode: new Map(),
   branches: [],
   employeeBranches: [],
   employeeFlexTimeByKey: {},
@@ -116,6 +117,11 @@ const ROUTES = {
 };
 
 const $ = (selector) => document.querySelector(selector);
+
+function getShiftByCode(code) {
+  const normalized = String(code || "").toUpperCase();
+  return state.shiftByCode.get(normalized) || null;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -1311,14 +1317,14 @@ async function confirmAttendanceManager() {
 }
 
 function shiftText(code) {
-  const s = state.shifts.find((x) => x.code === code);
+  const s = getShiftByCode(code);
   if (!s) return code;
   if (s.code === "FLEX") return `${s.code} (${s.name})`;
   return `${s.code} (${s.name}: ${s.start}-${s.end})`;
 }
 
 function shiftTimeRangeText(code) {
-  const s = state.shifts.find((x) => x.code === code);
+  const s = getShiftByCode(code);
   if (!s) return code;
   if (s.code === "FLEX") return "Linh hoạt";
   if (!s.start || !s.end) return s.name || code;
@@ -1326,7 +1332,7 @@ function shiftTimeRangeText(code) {
 }
 
 function shiftRowHourLabel(code) {
-  const s = state.shifts.find((x) => x.code === code);
+  const s = getShiftByCode(code);
   if (!s) return code;
   if (s.code === "FLEX") return "Giờ linh hoạt";
   if (!s.start || !s.end) return s.name || code;
@@ -1400,9 +1406,8 @@ function shiftRangeFromHHMM(startText, endText) {
 
 function shiftRangeByCode(shiftCode, record = null) {
   const normalized = String(shiftCode || "").toUpperCase();
-  const byCode = (code) => state.shifts.find((s) => String(s.code || "").toUpperCase() === code);
   const rangeFromDefinition = (code) => {
-    const shift = byCode(code);
+    const shift = getShiftByCode(code);
     return shift ? shiftRangeFromHHMM(shift.start, shift.end) : null;
   };
 
@@ -1484,7 +1489,7 @@ function shiftDisplayTime(item) {
   if (item.shift_code === "FLEX") {
     return `${item.flexible_start_at || "--:--"}-${item.flexible_end_at || "--:--"}`;
   }
-  const shift = state.shifts.find((s) => s.code === item.shift_code);
+  const shift = getShiftByCode(item.shift_code);
   if (shift?.start && shift?.end) {
     return `${shift.start}-${shift.end}`;
   }
@@ -4013,6 +4018,7 @@ function attachEvents() {
 async function bootstrap() {
   const meta = await api("/api/meta");
   state.shifts = meta.shifts;
+  state.shiftByCode = new Map((state.shifts || []).map((shift) => [String(shift.code || "").toUpperCase(), shift]));
   state.branches = meta.branches;
 
   $("#week-start").value = mondayOfCurrentWeekISO();

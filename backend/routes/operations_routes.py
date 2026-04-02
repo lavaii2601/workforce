@@ -682,7 +682,6 @@ def register_operations_routes(app, deps):
 
         row_items = [dict(row) for row in rows]
         team_key_to_members = {}
-        team_keys = []
         for item in row_items:
             if item.get("registration_type") != "group" or not item.get("group_code"):
                 continue
@@ -695,25 +694,39 @@ def register_operations_routes(app, deps):
             )
             if team_key not in team_key_to_members:
                 team_key_to_members[team_key] = []
-                team_keys.append(team_key)
 
-        for team_key in team_keys:
+        if team_key_to_members:
+            branch_ids = sorted({team_key[1] for team_key in team_key_to_members.keys()})
+            placeholders = ",".join(["?"] * len(branch_ids))
             team_rows = conn.execute(
-                """
-                SELECT u.display_name AS member_name
+                f"""
+                SELECT ws.week_start,
+                       ws.branch_id,
+                       ws.day_of_week,
+                       ws.shift_code,
+                       ws.group_code,
+                       u.display_name AS member_name
                 FROM weekly_schedule ws
                 JOIN users u ON u.id = ws.employee_id
                 WHERE ws.week_start = ?
-                  AND ws.branch_id = ?
-                  AND ws.day_of_week = ?
-                  AND ws.shift_code = ?
                   AND ws.registration_type = 'group'
-                  AND ws.group_code = ?
+                  AND ws.group_code IS NOT NULL
+                  AND ws.branch_id IN ({placeholders})
                 ORDER BY u.display_name
                 """,
-                team_key,
+                tuple([week_start] + branch_ids),
             ).fetchall()
-            team_key_to_members[team_key] = [team_row["member_name"] for team_row in team_rows]
+
+            for team_row in team_rows:
+                team_key = (
+                    team_row["week_start"],
+                    int(team_row["branch_id"]),
+                    int(team_row["day_of_week"]),
+                    team_row["shift_code"],
+                    team_row["group_code"],
+                )
+                if team_key in team_key_to_members:
+                    team_key_to_members[team_key].append(team_row["member_name"])
 
         conn.close()
 
@@ -794,6 +807,7 @@ def register_operations_routes(app, deps):
         staffing_rules = get_branch_staffing_rules(conn, user["branch_id"])
         normalized = []
         seen = set()
+        parsed_items = []
         for item in assignments:
             if not isinstance(item, dict):
                 conn.close()
@@ -812,46 +826,81 @@ def register_operations_routes(app, deps):
                 conn.close()
                 return jsonify({"error": "day_of_week must be in range 1..7"}), 400
 
-            in_scope = conn.execute(
-                """
-                SELECT 1
+            parsed_items.append(
+                {
+                    "employee_id": employee_id,
+                    "shift_code": shift_code,
+                    "day_of_week": day_of_week,
+                }
+            )
+
+        employee_ids = sorted({item["employee_id"] for item in parsed_items})
+        if employee_ids:
+            placeholders = ",".join(["?"] * len(employee_ids))
+            in_scope_rows = conn.execute(
+                f"""
+                SELECT DISTINCT u.id
                 FROM users u
-                WHERE u.id = ?
+                LEFT JOIN employee_branch_access eba
+                       ON eba.employee_id = u.id
+                      AND eba.branch_id = ?
+                WHERE u.id IN ({placeholders})
                   AND (
-                        (u.role = 'employee' AND EXISTS (
-                            SELECT 1
-                            FROM employee_branch_access eba
-                            WHERE eba.employee_id = u.id
-                              AND eba.branch_id = ?
-                        ))
+                        (u.role = 'employee' AND eba.employee_id IS NOT NULL)
                      OR (u.role = 'manager' AND u.branch_id = ?)
                   )
-                LIMIT 1
                 """,
-                (employee_id, user["branch_id"], user["branch_id"]),
-            ).fetchone()
-            if not in_scope:
-                conn.close()
-                return jsonify(
-                    {
-                        "error": "Employee is outside manager branch scope",
-                        "employee_id": employee_id,
-                    }
-                ), 400
+                tuple([user["branch_id"]] + employee_ids + [user["branch_id"]]),
+            ).fetchall()
+            in_scope_ids = {int(row["id"]) for row in in_scope_rows}
+        else:
+            in_scope_ids = set()
 
-            pref_exists = conn.execute(
-                """
-                SELECT registration_type, group_code, flexible_start_at, flexible_end_at
+        out_of_scope = next((item["employee_id"] for item in parsed_items if item["employee_id"] not in in_scope_ids), None)
+        if out_of_scope is not None:
+            conn.close()
+            return jsonify({"error": "Employee is outside manager branch scope", "employee_id": out_of_scope}), 400
+
+        pref_rows = []
+        if employee_ids:
+            pref_rows = conn.execute(
+                f"""
+                SELECT employee_id,
+                       shift_code,
+                       day_of_week,
+                       registration_type,
+                       group_code,
+                       flexible_start_at,
+                       flexible_end_at
                 FROM shift_preferences
-                WHERE employee_id = ?
+                WHERE employee_id IN ({placeholders})
                   AND week_start = ?
                   AND branch_id = ?
-                  AND shift_code = ?
-                  AND (day_of_week = ? OR day_of_week = 0)
                 """,
-                (employee_id, week_start, user["branch_id"], shift_code, day_of_week),
-            ).fetchone()
+                tuple(employee_ids + [week_start, user["branch_id"]]),
+            ).fetchall()
 
+        pref_exact = {}
+        pref_fallback = {}
+        for pref in pref_rows:
+            employee_id = int(pref["employee_id"])
+            shift_code = pref["shift_code"]
+            day_of_week = int(pref["day_of_week"])
+            pref_value = (
+                pref["registration_type"] or "individual",
+                pref["group_code"],
+                pref["flexible_start_at"],
+                pref["flexible_end_at"],
+            )
+            if day_of_week == 0:
+                pref_fallback[(employee_id, shift_code)] = pref_value
+            else:
+                pref_exact[(employee_id, shift_code, day_of_week)] = pref_value
+
+        for item in parsed_items:
+            employee_id = item["employee_id"]
+            shift_code = item["shift_code"]
+            day_of_week = item["day_of_week"]
             key = (employee_id, shift_code, day_of_week)
             if key in seen:
                 continue
@@ -861,11 +910,11 @@ def register_operations_routes(app, deps):
             group_code = None
             flexible_start_at = None
             flexible_end_at = None
-            if pref_exists:
-                registration_type = pref_exists["registration_type"] or "individual"
-                group_code = pref_exists["group_code"]
-                flexible_start_at = pref_exists["flexible_start_at"]
-                flexible_end_at = pref_exists["flexible_end_at"]
+            pref_value = pref_exact.get((employee_id, shift_code, day_of_week))
+            if pref_value is None:
+                pref_value = pref_fallback.get((employee_id, shift_code))
+            if pref_value is not None:
+                registration_type, group_code, flexible_start_at, flexible_end_at = pref_value
 
             normalized.append(
                 (
