@@ -4,14 +4,17 @@ import io
 import base64
 import json
 import os
+import re
 import hmac
 import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 
+import qrcode
 from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from .constants import SHIFT_CODE_SET, SHIFT_DEFINITIONS
 from .db import get_conn, init_db, is_postgres_backend
@@ -19,22 +22,15 @@ from .routes.attendance_routes import register_attendance_routes
 from .routes.general_routes import register_general_routes
 from .routes.leadership_routes import register_leadership_routes
 from .routes.operations_routes import register_operations_routes
+from .services.openjarvis_service import (
+    generate_jarvis_response,
+)
 
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 TOKEN_LIFETIME_DAYS = 7
 DEFAULT_STATELESS_SESSION_SECRET = "workforce-session-secret"
 DEFAULT_ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
-SECURITY_CSP = (
-    "default-src 'self'; "
-    "script-src 'self'; "
-    "style-src 'self'; "
-    "img-src 'self' data: blob:; "
-    "connect-src 'self'; "
-    "frame-ancestors 'none'; "
-    "base-uri 'self'; "
-    "form-action 'self'"
-)
 
 ROLE_PERMISSIONS = {
     "employee": [
@@ -85,10 +81,8 @@ def create_app():
     login_attempts_lock = Lock()
     login_attempts = {}
 
-    stateful_sessions_on_vercel = IS_VERCEL and not is_postgres_backend()
-    stateless_session_enabled = os.getenv("STATELESS_SESSION") == "1" or stateful_sessions_on_vercel
-    requires_stateless_for_ephemeral_db = stateful_sessions_on_vercel
-    attendance_qr_enabled = True
+    requires_stateless_for_ephemeral_db = IS_VERCEL and not is_postgres_backend()
+    stateless_session_enabled = os.getenv("STATELESS_SESSION") == "1" or requires_stateless_for_ephemeral_db
 
     def _prune_login_attempts(now_ts):
         stale_keys = [key for key, values in login_attempts.items() if values and values[-1] < now_ts - LOGIN_WINDOW_SECONDS]
@@ -134,17 +128,27 @@ def create_app():
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
-        if IS_VERCEL:
+        if os.getenv("VERCEL") == "1":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["Content-Security-Policy"] = SECURITY_CSP
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        response.headers["Content-Security-Policy"] = csp
         return response
 
     @app.errorhandler(RequestEntityTooLarge)
     def _handle_request_too_large(_error):
-        return jsonify({"error": "Payload too large (max 2MB). Please reduce image/file size and try again."}), 413
+        return jsonify({"error": "Payload too large"}), 413
 
     def _is_stateless_session_enabled():
         return stateless_session_enabled
@@ -160,8 +164,8 @@ def create_app():
         if requires_stateless_for_ephemeral_db:
             app.logger.warning(
                 "SESSION_TOKEN_SECRET is weak or missing on Vercel SQLite. "
-                "Continuing with stateless sessions to avoid random logouts across serverless instances. "
-                "Set SESSION_TOKEN_SECRET (>=32 chars) for production security."
+                "Continuing with stateless sessions using the fallback secret to avoid random logouts. "
+                "Set SESSION_TOKEN_SECRET (>=32 chars) to secure production sessions."
             )
         else:
             stateless_session_enabled = False
@@ -170,10 +174,8 @@ def create_app():
                 "Set SESSION_TOKEN_SECRET (>=32 chars) and optionally STATELESS_SESSION=1 to re-enable stateless sessions."
             )
     if IS_VERCEL and _is_weak_secret(ATTENDANCE_QR_SECRET, DEFAULT_ATTENDANCE_QR_SECRET):
-        attendance_qr_enabled = False
-        app.logger.warning(
-            "ATTENDANCE_QR_SECRET is weak or missing on Vercel; attendance QR endpoints are disabled. "
-            "Set ATTENDANCE_QR_SECRET (>=32 chars) to re-enable QR attendance."
+        raise RuntimeError(
+            "ATTENDANCE_QR_SECRET must be set to a strong random value (>=32 chars) on Vercel"
         )
 
     def _build_stateless_session_token(user_id):
@@ -388,20 +390,6 @@ def create_app():
         day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=day_of_week - 1)
         return day_dt.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
 
-    def _day_datetime_from_hhmm(week_start, day_of_week, hhmm_text):
-        text = (hhmm_text or "").strip()
-        if not text:
-            return None
-        parts = text.split(":")
-        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-            return None
-        hour = int(parts[0])
-        minute = int(parts[1])
-        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-            return None
-        day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=day_of_week - 1)
-        return day_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
     def _upsert_shift_attendance_mark(
         conn,
         *,
@@ -508,106 +496,7 @@ def create_app():
                 """,
                 (start_dt, end_dt),
             ).fetchall()
-
-        out = [dict(row) for row in rows]
-        if not out:
-            return out
-
-        employee_ids = [int(item["employee_id"]) for item in out]
-        placeholders = ",".join(["?"] * len(employee_ids))
-
-        details_sql = f"""
-            SELECT employee_id,
-               branch_id,
-               check_in_at,
-               check_out_at,
-               COALESCE(minutes_late, 0) AS minutes_late,
-               checked_in_by_manager_id
-            FROM attendance_logs
-            WHERE check_in_at >= ?
-              AND check_in_at < ?
-              AND employee_id IN ({placeholders})
-        """
-        params = [start_dt, end_dt, *employee_ids]
-        if branch_id:
-            details_sql += " AND branch_id = ?"
-            params.append(branch_id)
-        details_sql += " ORDER BY employee_id, check_in_at"
-
-        detail_rows = conn.execute(details_sql, tuple(params)).fetchall()
-
-        marks_sql = f"""
-            SELECT employee_id, status, source, week_start
-            FROM shift_attendance_marks
-            WHERE week_start = ?
-              AND employee_id IN ({placeholders})
-        """
-        mark_params = [week_start, *employee_ids]
-        if branch_id:
-            marks_sql += " AND branch_id = ?"
-            mark_params.append(branch_id)
-        mark_rows = conn.execute(marks_sql, tuple(mark_params)).fetchall()
-
-        override_count_by_emp = {}
-        for row in mark_rows:
-            if row["status"] == "present_override" and (row["source"] or "") == "manager_override_shortage":
-                emp_id = int(row["employee_id"])
-                override_count_by_emp[emp_id] = override_count_by_emp.get(emp_id, 0) + 1
-
-        by_employee = {}
-        for row in detail_rows:
-            emp_id = int(row["employee_id"])
-            bucket = by_employee.setdefault(
-                emp_id,
-                {
-                    "dates": [],
-                    "seen_dates": set(),
-                    "check_ins": [],
-                    "check_outs": [],
-                    "sources": [],
-                    "late_minutes_total": 0,
-                },
-            )
-
-            check_in_raw = str(row["check_in_at"] or "").strip()
-            check_out_raw = str(row["check_out_at"] or "").strip()
-
-            date_part = check_in_raw.split(" ")[0] if check_in_raw else ""
-            if date_part and date_part not in bucket["seen_dates"]:
-                bucket["seen_dates"].add(date_part)
-                bucket["dates"].append(date_part)
-
-            if check_in_raw:
-                bucket["check_ins"].append(check_in_raw)
-            if check_out_raw:
-                bucket["check_outs"].append(check_out_raw)
-
-            source_label = "manager_override" if row["checked_in_by_manager_id"] else "employee_self"
-            bucket["sources"].append(source_label)
-
-            bucket["late_minutes_total"] += max(0, int(row["minutes_late"] or 0))
-
-        for item in out:
-            detail = by_employee.get(int(item["employee_id"]))
-            if not detail:
-                item["work_dates"] = ""
-                item["check_in_times"] = ""
-                item["check_out_times"] = ""
-                item["attendance_sources"] = ""
-                item["late_minutes_total"] = 0
-                item["late_shortage_override_sessions"] = 0
-                continue
-
-            item["work_dates"] = " | ".join(detail["dates"])
-            item["check_in_times"] = " | ".join(detail["check_ins"])
-            item["check_out_times"] = " | ".join(detail["check_outs"])
-            item["attendance_sources"] = " | ".join(detail["sources"])
-            item["late_minutes_total"] = int(detail["late_minutes_total"])
-            item["late_shortage_override_sessions"] = int(
-                override_count_by_emp.get(int(item["employee_id"]), 0)
-            )
-
-        return out
+        return [dict(row) for row in rows]
 
     def _csv_response(filename, headers, rows):
         buf = io.StringIO()
@@ -615,70 +504,36 @@ def create_app():
         writer.writerow(headers)
         for row in rows:
             writer.writerow(row)
-        csv_text = "\ufeff" + buf.getvalue()
         return Response(
-            csv_text,
-            mimetype="text/csv; charset=utf-8",
+            buf.getvalue(),
+            mimetype="text/csv",
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
     def _build_weekly_payroll_csv(rows, week_start):
         headers = [
-            "Tuan",
-            "Ma nhan vien",
-            "Tai khoan",
-            "Ten nhan vien",
-            "Vai tro",
-            "Chi nhanh",
-            "Tong gio cong",
-            "So lan cham cong",
-            "Ngay lam",
-            "Gio vao",
-            "Gio ra",
-            "Nguon cham cong",
-            "Tong phut di tre",
-            "Ghi chu ke toan",
-            "So ca quan ly xac nhan thieu nhan su",
+            "employee_id",
+            "username",
+            "employee_name",
+            "role",
+            "branch_scope",
+            "hours_worked",
+            "attendance_sessions",
+            "week_start",
         ]
-
-        def _fmt_list_cell(value):
-            text = str(value or "").strip()
-            if not text:
-                return "-"
-            return text.replace(" | ", "; ")
-
-        def _fmt_source_cell(value):
-            text = str(value or "").strip()
-            if not text:
-                return "-"
-            mapping = {
-                "employee_self": "Nhan vien tu check-in",
-                "manager_override": "Quan ly xac nhan",
-            }
-            labels = [mapping.get(item.strip(), item.strip()) for item in text.split("|") if item.strip()]
-            return "; ".join(labels) if labels else "-"
-
         csv_rows = [
             [
-                week_start,
                 item["employee_id"],
                 item["username"],
                 item["employee_name"],
                 item["role"],
                 item["branch_name"],
-                f"{(item['total_minutes'] / 60):.2f}",
+                round(item["total_minutes"] / 60, 2),
                 item["attendance_sessions"],
-                _fmt_list_cell(item.get("work_dates", "")),
-                _fmt_list_cell(item.get("check_in_times", "")),
-                _fmt_list_cell(item.get("check_out_times", "")),
-                _fmt_source_cell(item.get("attendance_sources", "")),
-                item.get("late_minutes_total", 0),
-                "Ke toan xu ly" if item.get("late_minutes_total", 0) > 0 else "",
-                item.get("late_shortage_override_sessions", 0),
+                week_start,
             ]
             for item in rows
         ]
-
         return headers, csv_rows
 
     def _parse_pagination(default_page=1, default_page_size=10, max_page_size=100):
@@ -714,15 +569,18 @@ def create_app():
     def _build_branch_create_audit_details(name, location, network_ip):
         return (
             f"Da tao chi nhanh \"{name}\". "
-            f"Dia diem: {_audit_text(location)}."
+            f"Dia diem: {_audit_text(location)}. "
+            f"IP router: {_audit_text(network_ip, 'chua cau hinh')}."
         )
 
     def _build_branch_update_audit_details(branch_before, *, name, location, network_ip):
         old_name = (branch_before["name"] or "").strip()
         old_location = (branch_before["location"] or "").strip()
+        old_network_ip = (branch_before["network_ip"] or "").strip()
 
         new_name = (name or "").strip()
         new_location = (location or "").strip()
+        new_network_ip = (network_ip or "").strip()
 
         changes = []
         if old_name != new_name:
@@ -731,6 +589,13 @@ def create_app():
             changes.append(
                 f"Cap nhat dia diem tu \"{_audit_text(old_location)}\" sang \"{_audit_text(new_location)}\"."
             )
+        if old_network_ip != new_network_ip:
+            changes.append(
+                "Cap nhat IP router "
+                f"tu \"{_audit_text(old_network_ip, 'chua cau hinh')}\" "
+                f"sang \"{_audit_text(new_network_ip, 'chua cau hinh')}\"."
+            )
+
         if not changes:
             return f"Da mo cap nhat cho chi nhanh \"{_audit_text(new_name)}\" nhung khong co thay doi du lieu."
 
@@ -739,7 +604,8 @@ def create_app():
     def _build_branch_delete_audit_details(branch_before):
         name = _audit_text(branch_before["name"])
         location = _audit_text(branch_before["location"])
-        return f"Da xoa chi nhanh \"{name}\". Dia diem cu: {location}."
+        network_ip = _audit_text(branch_before["network_ip"], "chua cau hinh")
+        return f"Da xoa chi nhanh \"{name}\". Dia diem cu: {location}. IP router cu: {network_ip}."
 
     def _normalize_day_of_week(value, *, allow_zero=False):
         try:
@@ -805,22 +671,17 @@ def create_app():
 
         return True, None
 
-    def _generate_one_time_attendance_code(length=8):
+    def _generate_one_time_attendance_code():
         alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-        try:
-            size = int(length)
-        except (TypeError, ValueError):
-            size = 8
-        size = min(16, max(4, size))
-        return "".join(secrets.choice(alphabet) for _ in range(size))
+        return "".join(secrets.choice(alphabet) for _ in range(8))
+
+    def _build_one_time_qr_payload(branch_id, one_time_code, qr_token):
+        return f"WM1|{branch_id}|{one_time_code}|{qr_token}"
 
     def _build_static_branch_qr_payload(branch_id, qr_token):
         return f"WM2|{branch_id}|{qr_token}"
 
     def _build_qr_image_data_url(content):
-        # Lazy import to reduce startup memory footprint in requests that never generate QR images.
-        import qrcode
-
         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=7, border=2)
         qr.add_data(content)
         qr.make(fit=True)
@@ -900,17 +761,14 @@ def create_app():
         rules = {row["shift_code"]: {"min_staff": row["min_staff"], "max_staff": row["max_staff"]} for row in rows}
         # Fallback defaults for old data or missing rows.
         for shift in SHIFT_DEFINITIONS:
-            if shift["code"] == "FLEX":
-                rules.setdefault(shift["code"], {"min_staff": 0, "max_staff": 999})
-            else:
-                rules.setdefault(shift["code"], {"min_staff": 3, "max_staff": 4})
+            rules.setdefault(shift["code"], {"min_staff": 3, "max_staff": 4})
         return rules
 
     def _resolve_today_shift_for_checkin(conn, employee_id, branch_id, current_dt):
         week_start, day_of_week = _week_start_and_day_for_datetime(current_dt)
         rows = conn.execute(
             """
-                        SELECT id, week_start, day_of_week, shift_code, flexible_start_at, flexible_end_at
+            SELECT id, week_start, day_of_week, shift_code
             FROM weekly_schedule
             WHERE employee_id = ?
               AND branch_id = ?
@@ -921,35 +779,21 @@ def create_app():
             (employee_id, branch_id, week_start, day_of_week),
         ).fetchall()
         if not rows:
-            return None, None, None, None, "Nhân viên không có ca làm, không thể check-in"
+            return None, None, None, None, "Không có ca được phân cho hôm nay"
 
         enriched = []
         for row in rows:
-            if row["shift_code"] == "FLEX":
-                start_dt = _day_datetime_from_hhmm(
-                    row["week_start"],
-                    row["day_of_week"],
-                    row["flexible_start_at"],
-                ) or current_dt
-                # Flexible shifts should not be auto-marked absent by fixed 15-minute rule.
-                late_deadline = current_dt + timedelta(hours=24)
-            else:
-                start_dt = _shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
-                if not start_dt:
-                    continue
-                late_deadline = start_dt + timedelta(minutes=15)
+            start_dt = _shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
+            if not start_dt:
+                continue
+            late_deadline = start_dt + timedelta(minutes=15)
             enriched.append((row, start_dt, late_deadline))
 
         if not enriched:
             return None, None, None, None, "Không xác định được thời gian ca"
 
         enriched.sort(key=lambda item: item[1])
-        if current_dt < enriched[0][1]:
-            return None, None, None, week_start, "Chưa tới ca làm việc"
-
         for row, start_dt, late_deadline in enriched:
-            if current_dt < start_dt:
-                return None, None, None, week_start, "Chưa tới ca làm việc"
             if current_dt <= late_deadline:
                 return row, start_dt, late_deadline, week_start, None
 
@@ -999,7 +843,6 @@ def create_app():
             "_build_qr_image_data_url": _build_qr_image_data_url,
             "_generate_one_time_attendance_code": _generate_one_time_attendance_code,
             "ATTENDANCE_QR_ONE_TIME_TTL_SECONDS": ATTENDANCE_QR_ONE_TIME_TTL_SECONDS,
-            "ATTENDANCE_QR_ENABLED": attendance_qr_enabled,
         },
     )
 
@@ -1019,6 +862,7 @@ def create_app():
             "_csv_response": _csv_response,
             "_build_weekly_payroll_csv": _build_weekly_payroll_csv,
             "_manager_can_manage_employee": _manager_can_manage_employee,
+            "_create_audit_log": _create_audit_log,
             "SHIFT_CODE_SET": SHIFT_CODE_SET,
             "SHIFT_DEFINITIONS": SHIFT_DEFINITIONS,
         },
@@ -1051,4 +895,3 @@ def create_app():
 if __name__ == "__main__":
     debug_enabled = os.getenv("FLASK_DEBUG") == "1"
     create_app().run(host="0.0.0.0", port=5000, debug=debug_enabled)
-

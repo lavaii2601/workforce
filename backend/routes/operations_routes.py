@@ -1,6 +1,8 @@
 import re
 import secrets
 import base64
+import hashlib
+import json
 from datetime import datetime, timedelta
 
 from flask import jsonify, request, Response
@@ -21,6 +23,7 @@ def register_operations_routes(app, deps):
     csv_response = deps["_csv_response"]
     build_weekly_payroll_csv = deps["_build_weekly_payroll_csv"]
     manager_can_manage_employee = deps["_manager_can_manage_employee"]
+    create_audit_log = deps.get("_create_audit_log")
 
     shift_code_set = deps["SHIFT_CODE_SET"]
     shift_definitions = deps["SHIFT_DEFINITIONS"]
@@ -53,6 +56,51 @@ def register_operations_routes(app, deps):
         hour_text, minute_text = text.split(":")
         day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=int(day_of_week) - 1)
         return day_dt.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
+
+    def _schedule_rows_for_branch_week(conn, week_start, branch_id):
+        rows = conn.execute(
+            """
+            SELECT employee_id,
+                   shift_code,
+                   day_of_week,
+                   registration_type,
+                   group_code,
+                   flexible_start_at,
+                   flexible_end_at
+            FROM weekly_schedule
+            WHERE week_start = ?
+              AND branch_id = ?
+            ORDER BY day_of_week, shift_code, employee_id
+            """,
+            (week_start, branch_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _schedule_row_tuple(row):
+        return (
+            int(row.get("employee_id") or 0),
+            str(row.get("shift_code") or ""),
+            int(row.get("day_of_week") or 0),
+            str(row.get("registration_type") or "individual"),
+            str(row.get("group_code") or ""),
+            str(row.get("flexible_start_at") or ""),
+            str(row.get("flexible_end_at") or ""),
+        )
+
+    def _schedule_revision(rows):
+        payload = [_schedule_row_tuple(row) for row in rows]
+        raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _format_schedule_tuple(item, employee_name_map):
+        employee_id, shift_code, day_of_week, registration_type, group_code, flex_start, flex_end = item
+        employee_name = employee_name_map.get(employee_id, f"employee_id={employee_id}")
+        text = f"{employee_name} | {shift_code} | day={day_of_week}"
+        if registration_type == "group" and group_code:
+            text += f" | group={group_code}"
+        if shift_code == "FLEX" and flex_start and flex_end:
+            text += f" | {flex_start}-{flex_end}"
+        return text
 
     @app.post("/api/issues")
     def create_issue():
@@ -796,6 +844,7 @@ def register_operations_routes(app, deps):
 
         body = request.get_json(silent=True) or {}
         week_start = (body.get("week_start") or "").strip()
+        schedule_revision = (body.get("schedule_revision") or "").strip()
         assignments = body.get("assignments") or []
 
         if not week_start:
@@ -804,6 +853,21 @@ def register_operations_routes(app, deps):
             return jsonify({"error": "assignments must be a list"}), 400
 
         conn = get_conn()
+        current_schedule_rows = _schedule_rows_for_branch_week(conn, week_start, user["branch_id"])
+        current_schedule_revision = _schedule_revision(current_schedule_rows)
+        if schedule_revision and schedule_revision != current_schedule_revision:
+            conn.close()
+            return (
+                jsonify(
+                    {
+                        "error": "Lịch đã được cập nhật bởi người khác. Vui lòng tải lại trước khi lưu.",
+                        "code": "schedule_conflict",
+                        "current_revision": current_schedule_revision,
+                    }
+                ),
+                409,
+            )
+
         staffing_rules = get_branch_staffing_rules(conn, user["branch_id"])
         normalized = []
         seen = set()
@@ -835,32 +899,7 @@ def register_operations_routes(app, deps):
             )
 
         employee_ids = sorted({item["employee_id"] for item in parsed_items})
-        if employee_ids:
-            placeholders = ",".join(["?"] * len(employee_ids))
-            in_scope_rows = conn.execute(
-                f"""
-                SELECT DISTINCT u.id
-                FROM users u
-                LEFT JOIN employee_branch_access eba
-                       ON eba.employee_id = u.id
-                      AND eba.branch_id = ?
-                WHERE u.id IN ({placeholders})
-                  AND (
-                        (u.role = 'employee' AND eba.employee_id IS NOT NULL)
-                     OR (u.role = 'manager' AND u.branch_id = ?)
-                  )
-                """,
-                tuple([user["branch_id"]] + employee_ids + [user["branch_id"]]),
-            ).fetchall()
-            in_scope_ids = {int(row["id"]) for row in in_scope_rows}
-        else:
-            in_scope_ids = set()
-
-        out_of_scope = next((item["employee_id"] for item in parsed_items if item["employee_id"] not in in_scope_ids), None)
-        if out_of_scope is not None:
-            conn.close()
-            return jsonify({"error": "Employee is outside manager branch scope", "employee_id": out_of_scope}), 400
-
+        placeholders = ",".join(["?"] * len(employee_ids)) if employee_ids else ""
         pref_rows = []
         if employee_ids:
             pref_rows = conn.execute(
@@ -897,14 +936,36 @@ def register_operations_routes(app, deps):
             else:
                 pref_exact[(employee_id, shift_code, day_of_week)] = pref_value
 
+        group_member_cache = {}
+
+        def _group_member_ids(group_code):
+            cached = group_member_cache.get(group_code)
+            if cached is not None:
+                return cached
+
+            rows = conn.execute(
+                """
+                SELECT DISTINCT gm.employee_id
+                FROM shift_registration_groups g
+                JOIN shift_registration_group_members gm ON gm.group_id = g.id
+                WHERE g.week_start = ?
+                  AND g.branch_id = ?
+                  AND g.group_code = ?
+                """,
+                (week_start, user["branch_id"], group_code),
+            ).fetchall()
+            member_ids = [int(row["employee_id"]) for row in rows]
+            group_member_cache[group_code] = member_ids
+            return member_ids
+
+        expanded_items = []
+        expanded_seen = set()
+        target_employee_ids = set()
+
         for item in parsed_items:
             employee_id = item["employee_id"]
             shift_code = item["shift_code"]
             day_of_week = item["day_of_week"]
-            key = (employee_id, shift_code, day_of_week)
-            if key in seen:
-                continue
-            seen.add(key)
 
             registration_type = "individual"
             group_code = None
@@ -916,6 +977,72 @@ def register_operations_routes(app, deps):
             if pref_value is not None:
                 registration_type, group_code, flexible_start_at, flexible_end_at = pref_value
 
+            target_ids = [employee_id]
+            if registration_type == "group" and group_code:
+                member_ids = _group_member_ids(group_code)
+                if member_ids:
+                    target_ids = member_ids
+
+            for target_employee_id in target_ids:
+                key = (
+                    target_employee_id,
+                    shift_code,
+                    day_of_week,
+                    registration_type,
+                    group_code,
+                    flexible_start_at,
+                    flexible_end_at,
+                )
+                if key in expanded_seen:
+                    continue
+                expanded_seen.add(key)
+                target_employee_ids.add(target_employee_id)
+                expanded_items.append(
+                    (
+                        target_employee_id,
+                        shift_code,
+                        day_of_week,
+                        registration_type,
+                        group_code,
+                        flexible_start_at,
+                        flexible_end_at,
+                    )
+                )
+
+        if target_employee_ids:
+            target_id_list = sorted(target_employee_ids)
+            target_placeholders = ",".join(["?"] * len(target_id_list))
+            in_scope_rows = conn.execute(
+                f"""
+                SELECT DISTINCT u.id
+                FROM users u
+                LEFT JOIN employee_branch_access eba
+                       ON eba.employee_id = u.id
+                      AND eba.branch_id = ?
+                WHERE u.id IN ({target_placeholders})
+                  AND (
+                        (u.role = 'employee' AND eba.employee_id IS NOT NULL)
+                     OR (u.role = 'manager' AND u.branch_id = ?)
+                  )
+                """,
+                tuple([user["branch_id"]] + target_id_list + [user["branch_id"]]),
+            ).fetchall()
+            in_scope_ids = {int(row["id"]) for row in in_scope_rows}
+
+            out_of_scope = next((employee_id for employee_id in target_id_list if employee_id not in in_scope_ids), None)
+            if out_of_scope is not None:
+                conn.close()
+                return jsonify({"error": "Employee is outside manager branch scope", "employee_id": out_of_scope}), 400
+
+        for (
+            employee_id,
+            shift_code,
+            day_of_week,
+            registration_type,
+            group_code,
+            flexible_start_at,
+            flexible_end_at,
+        ) in expanded_items:
             normalized.append(
                 (
                     week_start,
@@ -990,9 +1117,74 @@ def register_operations_routes(app, deps):
                 """,
                 normalized,
             )
+
+        previous_set = {_schedule_row_tuple(row) for row in current_schedule_rows}
+        new_schedule_rows = [
+            {
+                "employee_id": item[2],
+                "shift_code": item[3],
+                "day_of_week": item[4],
+                "registration_type": item[5],
+                "group_code": item[6],
+                "flexible_start_at": item[7],
+                "flexible_end_at": item[8],
+            }
+            for item in normalized
+        ]
+        new_set = {_schedule_row_tuple(row) for row in new_schedule_rows}
+        added = sorted(new_set - previous_set)
+        removed = sorted(previous_set - new_set)
+
+        if create_audit_log:
+            all_employee_ids = sorted({item[0] for item in (added + removed)})
+            employee_name_map = {}
+            if all_employee_ids:
+                placeholders = ",".join(["?"] * len(all_employee_ids))
+                employee_rows = conn.execute(
+                    f"SELECT id, display_name FROM users WHERE id IN ({placeholders})",
+                    tuple(all_employee_ids),
+                ).fetchall()
+                employee_name_map = {
+                    int(row["id"]): str(row["display_name"] or f"employee_id={row['id']}")
+                    for row in employee_rows
+                }
+
+            details_payload = {
+                "week_start": week_start,
+                "branch_id": user["branch_id"],
+                "before_count": len(previous_set),
+                "after_count": len(new_set),
+                "added_count": len(added),
+                "removed_count": len(removed),
+                "added_preview": [
+                    _format_schedule_tuple(item, employee_name_map)
+                    for item in added[:12]
+                ],
+                "removed_preview": [
+                    _format_schedule_tuple(item, employee_name_map)
+                    for item in removed[:12]
+                ],
+                "revision_before": current_schedule_revision,
+                "revision_after": _schedule_revision(new_schedule_rows),
+            }
+            create_audit_log(
+                conn,
+                user,
+                action="manager.schedule.update",
+                target_type="branch_schedule",
+                target_id=user["branch_id"],
+                details=json.dumps(details_payload, ensure_ascii=True, separators=(",", ":")),
+            )
+
         conn.commit()
         conn.close()
-        return jsonify({"message": "Weekly schedule saved", "count": len(normalized)})
+        return jsonify(
+            {
+                "message": "Weekly schedule saved",
+                "count": len(normalized),
+                "schedule_revision": _schedule_revision(new_schedule_rows),
+            }
+        )
 
     @app.get("/api/manager/staffing-rules")
     def manager_staffing_rules_get():
@@ -1099,9 +1291,34 @@ def register_operations_routes(app, deps):
             """,
             (week_start, user["branch_id"]),
         ).fetchall()
+        payload = [dict(row) for row in rows]
+        response = jsonify(payload)
+        response.headers["X-Schedule-Revision"] = _schedule_revision(payload)
         conn.close()
 
-        return jsonify([dict(row) for row in rows])
+        return response
+
+    @app.get("/api/manager/schedule-revision")
+    def manager_get_schedule_revision():
+        user, error = get_user_from_token(roles={"manager"})
+        if error:
+            return error
+
+        week_start = (request.args.get("week_start") or "").strip()
+        if not week_start:
+            return jsonify({"error": "week_start is required"}), 400
+
+        conn = get_conn()
+        rows = _schedule_rows_for_branch_week(conn, week_start, user["branch_id"])
+        conn.close()
+        return jsonify(
+            {
+                "week_start": week_start,
+                "branch_id": user["branch_id"],
+                "schedule_revision": _schedule_revision(rows),
+                "count": len(rows),
+            }
+        )
 
     @app.get("/api/manager/attendance-shifts/today")
     def manager_attendance_shifts_today():

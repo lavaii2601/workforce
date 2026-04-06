@@ -318,6 +318,29 @@ def register_leadership_routes(app, deps):
                 conn.close()
                 return jsonify({"error": "Invalid branch_id"}), 400
 
+            existing_manager = conn.execute(
+                """
+                SELECT id, username, display_name
+                FROM users
+                WHERE role = 'manager' AND branch_id = ?
+                LIMIT 1
+                """,
+                (branch_id,),
+            ).fetchone()
+            if existing_manager:
+                conn.close()
+                return jsonify(
+                    {
+                        "error": "Each branch can have only one manager",
+                        "branch_id": branch_id,
+                        "existing_manager": {
+                            "id": existing_manager["id"],
+                            "username": existing_manager["username"],
+                            "display_name": existing_manager["display_name"],
+                        },
+                    }
+                ), 409
+
             cur = conn.execute(
                 """
                 INSERT INTO users(username, display_name, role, branch_id, password_hash, is_active)
@@ -416,6 +439,42 @@ def register_leadership_routes(app, deps):
 
         if role != "manager":
             branch_id = None
+        else:
+            try:
+                branch_id = int(branch_id)
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"error": "branch_id is required for manager role"}), 400
+
+            valid_branch = conn.execute("SELECT id FROM branches WHERE id = ?", (branch_id,)).fetchone()
+            if not valid_branch:
+                conn.close()
+                return jsonify({"error": "Invalid branch_id"}), 400
+
+            existing_manager = conn.execute(
+                """
+                SELECT id, username, display_name
+                FROM users
+                WHERE role = 'manager'
+                  AND branch_id = ?
+                  AND id != ?
+                LIMIT 1
+                """,
+                (branch_id, user_id),
+            ).fetchone()
+            if existing_manager:
+                conn.close()
+                return jsonify(
+                    {
+                        "error": "Each branch can have only one manager",
+                        "branch_id": branch_id,
+                        "existing_manager": {
+                            "id": existing_manager["id"],
+                            "username": existing_manager["username"],
+                            "display_name": existing_manager["display_name"],
+                        },
+                    }
+                ), 409
 
         conn.execute(
             "UPDATE users SET role = ?, is_active = ?, branch_id = ? WHERE id = ?",

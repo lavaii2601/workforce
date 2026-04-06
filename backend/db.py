@@ -495,6 +495,10 @@ def _init_db_inner():
         CREATE INDEX IF NOT EXISTS idx_employee_branch_access_branch_employee
         ON employee_branch_access(branch_id, employee_id);
 
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_users_single_manager_per_branch
+        ON users(branch_id)
+        WHERE role = 'manager' AND branch_id IS NOT NULL;
+
         CREATE INDEX IF NOT EXISTS idx_shift_preferences_employee_week
         ON shift_preferences(employee_id, week_start);
 
@@ -959,6 +963,9 @@ def _run_migrations(conn):
         """
     )
 
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_single_manager_per_branch ON users(branch_id) WHERE role = 'manager' AND branch_id IS NOT NULL"
+    )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_checkin ON attendance_logs(employee_id, check_in_at)"
     )

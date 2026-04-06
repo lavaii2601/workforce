@@ -51,6 +51,7 @@ const managerScheduleUiState = {
   activeTab: "preferences",
   selectedDay: 0,
   assignedSelectedDay: 0,
+  scheduleRevision: "",
 };
 
 const managerEmployeeUiState = {
@@ -1516,9 +1517,15 @@ function groupScheduleRowsForDisplay(rows) {
   const groups = new Map();
   rows.forEach((item) => {
     const isLarge = item.shift_code === "M1" || item.shift_code === "M2" || item.shift_code === "FLEX";
-    const key = isLarge
-      ? `${item.shift_code}|${shiftDisplayTime(item)}`
-      : `${item.shift_code}|${item.employee_id}`;
+    const isGroup = item.registration_type === "group" && !!item.group_code;
+    let key = "";
+    if (isGroup) {
+      key = `${item.shift_code}|GROUP|${item.group_code}|${shiftDisplayTime(item)}`;
+    } else {
+      key = isLarge
+        ? `${item.shift_code}|${shiftDisplayTime(item)}`
+        : `${item.shift_code}|${item.employee_id}`;
+    }
     if (!groups.has(key)) {
       groups.set(key, []);
     }
@@ -1533,6 +1540,13 @@ function compactGroupedShiftTag(items) {
   if (list.length === 1) return compactShiftTag(list[0]);
 
   const lead = list[0];
+  const isGroup = lead.registration_type === "group" && !!lead.group_code;
+  if (isGroup) {
+    const teamCode = escapeHtml(lead.group_code);
+    const timeText = escapeHtml(shiftDisplayTime(lead));
+    return `<span class="tt-pill compact-shift-pill worker-shift-pill grouped-shift-pill" title="Team ${teamCode} | ${timeText}"><span class="worker-name-icon">${list.length}</span><span class="worker-shift-meta"><span class="worker-name-text">Team ${teamCode}</span><small>${timeText}</small></span></span>`;
+  }
+
   const isMain = lead.shift_code === "M1" || lead.shift_code === "M2";
   const isFlex = lead.shift_code === "FLEX";
   const names = list
@@ -1554,7 +1568,64 @@ function collectAnchoredRows(records, rowShiftCode, day) {
   });
 }
 
+function buildManagerAssignableRows(rows) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const groupedMap = new Map();
+  const ordered = [];
+
+  sourceRows.forEach((row) => {
+    const isGroup = row.registration_type === "group" && !!row.group_code;
+    if (!isGroup) {
+      ordered.push({
+        employee_id: Number(row.employee_id),
+        shift_code: row.shift_code,
+        employee_name: row.employee_name,
+        flexible_start_at: row.flexible_start_at,
+        flexible_end_at: row.flexible_end_at,
+        is_group: false,
+        group_code: null,
+      });
+      return;
+    }
+
+    const groupKey = [
+      String(row.shift_code || ""),
+      String(row.group_code || ""),
+      String(row.flexible_start_at || ""),
+      String(row.flexible_end_at || ""),
+    ].join("|");
+
+    if (!groupedMap.has(groupKey)) {
+      const item = {
+        employee_id: Number(row.employee_id),
+        shift_code: row.shift_code,
+        employee_name: `Team ${row.group_code}`,
+        flexible_start_at: row.flexible_start_at,
+        flexible_end_at: row.flexible_end_at,
+        is_group: true,
+        group_code: row.group_code,
+      };
+      groupedMap.set(groupKey, item);
+      ordered.push(item);
+      return;
+    }
+
+    const existing = groupedMap.get(groupKey);
+    if (Number(row.employee_id) < Number(existing.employee_id)) {
+      existing.employee_id = Number(row.employee_id);
+    }
+  });
+
+  return ordered;
+}
+
 function compactShiftTag(item) {
+  if (item.registration_type === "group" && item.group_code) {
+    const teamCode = escapeHtml(item.group_code);
+    const timeText = escapeHtml(shiftDisplayTime(item));
+    return `<span class="tt-pill worker-shift-pill" title="Team ${teamCode} | ${timeText}"><span class="worker-name-icon">T</span><span class="worker-shift-meta"><span class="worker-name-text">Team ${teamCode}</span><small>${timeText}</small></span></span>`;
+  }
+
   const name = escapeHtml(item.employee_name || "-");
   const initials = escapeHtml(employeeInitials(item.employee_name));
   const timeText = escapeHtml(shiftDisplayTime(item));
@@ -2503,11 +2574,14 @@ async function createManagerRegistrationGroup() {
 }
 
 async function loadManagerSchedule() {
-  const [prefs, schedule, employeePayload] = await Promise.all([
+  const [prefs, schedule, scheduleRevisionPayload, employeePayload] = await Promise.all([
     api(`/api/manager/preferences?week_start=${encodeURIComponent(currentWeek())}`),
     api(`/api/manager/schedule?week_start=${encodeURIComponent(currentWeek())}`),
+    api(`/api/manager/schedule-revision?week_start=${encodeURIComponent(currentWeek())}`),
     api("/api/manager/employees"),
   ]);
+
+  managerScheduleUiState.scheduleRevision = String(scheduleRevisionPayload?.schedule_revision || "");
 
   const _ = employeePayload; // keep payload request for future UI extensions
 
@@ -2554,11 +2628,12 @@ async function loadManagerSchedule() {
     const cells = prefDays
       .map((meta) => {
         const rows = collectAnchoredRows(prefs, shift.code, meta.day);
-        const hasAssignableRows = rows.length > 0;
+        const assignableRows = buildManagerAssignableRows(rows);
+        const hasAssignableRows = assignableRows.length > 0;
         const cellClass = hasAssignableRows ? "has-data" : "is-empty";
         let content = `<span class="tt-empty">Không có nhân sự để phân công</span>`;
         if (hasAssignableRows) {
-          content = rows
+          content = assignableRows
             .map((p) => {
               const key = `${p.employee_id}|${p.shift_code}|${meta.day}`;
               const checked = assigned.has(key) ? "checked" : "";
@@ -2571,7 +2646,10 @@ async function loadManagerSchedule() {
                   : p.shift_code === "M1" || p.shift_code === "M2"
                     ? ` <small>(${p.shift_code})</small>`
                     : "";
-              return `<label class="tt-checkbox"><input type="checkbox" data-eid="${p.employee_id}" data-shift="${p.shift_code}" data-day="${meta.day}" ${checked} /><span class="worker-pref-chip"><span class="worker-name-icon">${initials}</span><span class="worker-shift-meta"><span class="worker-name-text">${escapeHtml(p.employee_name || "-")}</span>${timeText ? `<small>${timeText}</small>` : ""}</span></span>${tag}</label>`;
+              const groupBadge = p.is_group
+                ? `<small class="worker-group-badge">Team ${escapeHtml(p.group_code || "-")}</small>`
+                : "";
+              return `<label class="tt-checkbox"><input type="checkbox" data-eid="${p.employee_id}" data-shift="${p.shift_code}" data-day="${meta.day}" ${checked} /><span class="worker-pref-chip"><span class="worker-name-icon">${initials}</span><span class="worker-shift-meta"><span class="worker-name-text">${escapeHtml(p.employee_name || "-")}</span>${groupBadge}${timeText ? `<small>${timeText}</small>` : ""}</span></span>${tag}</label>`;
             })
             .join("");
         }
@@ -2635,10 +2713,15 @@ async function saveManagerSchedule() {
     shift_code: el.dataset.shift,
     day_of_week: Number(el.dataset.day),
   }));
-  await api("/api/manager/schedule", {
+  const payload = await api("/api/manager/schedule", {
     method: "PUT",
-    body: JSON.stringify({ week_start: currentWeek(), assignments }),
+    body: JSON.stringify({
+      week_start: currentWeek(),
+      assignments,
+      schedule_revision: managerScheduleUiState.scheduleRevision,
+    }),
   });
+  managerScheduleUiState.scheduleRevision = String(payload?.schedule_revision || managerScheduleUiState.scheduleRevision || "");
   showToast("Đã cập nhật lịch nhân viên");
   await loadManagerSchedule();
 }
