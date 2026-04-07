@@ -72,6 +72,7 @@ def create_app():
     PROFILE_REQUIRED_ROLES = {"employee", "manager"}
     ATTENDANCE_QR_ONE_TIME_TTL_SECONDS = 45
     ATTENDANCE_QR_SECRET = os.getenv("ATTENDANCE_QR_SECRET", DEFAULT_ATTENDANCE_QR_SECRET)
+    ATTENDANCE_QR_ENABLED = True
     STATELESS_SESSION_SECRET = os.getenv("SESSION_TOKEN_SECRET", DEFAULT_STATELESS_SESSION_SECRET)
     IS_VERCEL = os.getenv("VERCEL") == "1"
     DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -174,8 +175,11 @@ def create_app():
                 "Set SESSION_TOKEN_SECRET (>=32 chars) and optionally STATELESS_SESSION=1 to re-enable stateless sessions."
             )
     if IS_VERCEL and _is_weak_secret(ATTENDANCE_QR_SECRET, DEFAULT_ATTENDANCE_QR_SECRET):
-        raise RuntimeError(
-            "ATTENDANCE_QR_SECRET must be set to a strong random value (>=32 chars) on Vercel"
+        ATTENDANCE_QR_ENABLED = False
+        app.logger.warning(
+            "ATTENDANCE_QR_SECRET is weak or missing on Vercel. "
+            "Attendance QR endpoints are disabled. "
+            "Set ATTENDANCE_QR_SECRET (>=32 chars) to re-enable QR check-in."
         )
 
     def _build_stateless_session_token(user_id):
@@ -843,6 +847,7 @@ def create_app():
             "_build_qr_image_data_url": _build_qr_image_data_url,
             "_generate_one_time_attendance_code": _generate_one_time_attendance_code,
             "ATTENDANCE_QR_ONE_TIME_TTL_SECONDS": ATTENDANCE_QR_ONE_TIME_TTL_SECONDS,
+            "ATTENDANCE_QR_ENABLED": ATTENDANCE_QR_ENABLED,
         },
     )
 
