@@ -972,25 +972,38 @@ def register_operations_routes(app, deps):
             else:
                 pref_exact[(employee_id, shift_code, day_of_week)] = pref_value
 
+        group_member_map = {}
         group_member_cache = {}
+
+        group_codes = sorted({
+            str(item.get("group_code") or "").strip()
+            for item in parsed_items
+            if (item.get("registration_type") or "individual") == "group" and (item.get("group_code") or "").strip()
+        })
+        if group_codes:
+            placeholders = ",".join(["?"] * len(group_codes))
+            rows = conn.execute(
+                f"""
+                SELECT g.group_code,
+                       gm.employee_id
+                FROM shift_registration_groups g
+                JOIN shift_registration_group_members gm ON gm.group_id = g.id
+                WHERE g.week_start = ?
+                  AND g.branch_id = ?
+                  AND g.group_code IN ({placeholders})
+                ORDER BY g.group_code, gm.employee_id
+                """,
+                tuple([week_start, user["branch_id"]] + group_codes),
+            ).fetchall()
+            for row in rows:
+                group_member_map.setdefault(row["group_code"], []).append(int(row["employee_id"]))
 
         def _group_member_ids(group_code):
             cached = group_member_cache.get(group_code)
             if cached is not None:
                 return cached
 
-            rows = conn.execute(
-                """
-                SELECT DISTINCT gm.employee_id
-                FROM shift_registration_groups g
-                JOIN shift_registration_group_members gm ON gm.group_id = g.id
-                WHERE g.week_start = ?
-                  AND g.branch_id = ?
-                  AND g.group_code = ?
-                """,
-                (week_start, user["branch_id"], group_code),
-            ).fetchall()
-            member_ids = [int(row["employee_id"]) for row in rows]
+            member_ids = group_member_map.get(group_code, [])
             group_member_cache[group_code] = member_ids
             return member_ids
 

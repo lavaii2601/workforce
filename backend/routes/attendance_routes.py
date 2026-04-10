@@ -321,7 +321,7 @@ def register_attendance_routes(app, deps):
         note = (body.get("note") or "").strip() or None
         
         conn = get_conn()
-        _auto_checkout_open_logs_for_employee(conn)
+        _auto_checkout_open_logs_for_employee(conn, user["id"])
         if user["role"] == "manager":
             branch_id = user["branch_id"]
         else:
@@ -410,6 +410,7 @@ def register_attendance_routes(app, deps):
         note = (body.get("note") or "").strip() or None
 
         conn = get_conn()
+        _auto_checkout_open_logs_for_employee(conn, user["id"])
         open_log = conn.execute(
             """
             SELECT id, branch_id
@@ -444,7 +445,7 @@ def register_attendance_routes(app, deps):
             return error
 
         conn = get_conn()
-        _auto_checkout_open_logs_for_employee(conn)
+        _auto_checkout_open_logs_for_employee(conn, user["id"])
         open_log = conn.execute(
             """
                         SELECT id, check_in_at, confirmed_at
@@ -487,7 +488,7 @@ def register_attendance_routes(app, deps):
 
         now_dt = datetime.now()
         conn = get_conn()
-        _auto_checkout_open_logs_for_employee(conn)
+        _auto_checkout_open_logs_for_employee(conn, user["id"])
 
         if user["role"] == "manager":
             branch_id = user.get("branch_id")
@@ -558,7 +559,7 @@ def register_attendance_routes(app, deps):
         start_dt, end_dt = week_range(week_start)
 
         conn = get_conn()
-        _auto_checkout_open_logs_for_employee(conn)
+        _auto_checkout_open_logs_for_employee(conn, user["id"])
         rows = conn.execute(
             """
             SELECT a.id,
@@ -673,7 +674,7 @@ def register_attendance_routes(app, deps):
             return jsonify({"error": token_error}), 400
 
         conn = get_conn()
-        _auto_checkout_open_logs_for_employee(conn)
+        _auto_checkout_open_logs_for_employee(conn, user["id"])
 
         branch = conn.execute(
             "SELECT id, name, network_ip FROM branches WHERE id = ?",
