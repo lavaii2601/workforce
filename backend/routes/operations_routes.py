@@ -153,25 +153,47 @@ def register_operations_routes(app, deps):
             return error
 
         conn = get_conn()
-        rows = conn.execute(
-            """
-            SELECT i.id,
-                   i.title,
-                   i.details,
-                   i.branch_id,
-                   i.status,
-                   i.escalated_to_ceo,
-                   i.manager_note,
-                   i.created_at,
-                   i.updated_at,
-                   COALESCE(b.name, '-') AS branch_name
-            FROM issue_reports i
-            LEFT JOIN branches b ON b.id = i.branch_id
-            WHERE i.reporter_id = ?
-            ORDER BY i.id DESC
-            """,
-            (user["id"],),
-        ).fetchall()
+        if user["role"] == "employee":
+            rows = conn.execute(
+                """
+                SELECT i.id,
+                       i.title,
+                       i.details,
+                       i.branch_id,
+                       i.status,
+                       i.escalated_to_ceo,
+                       i.manager_note,
+                       i.created_at,
+                       i.updated_at,
+                       COALESCE(b.name, '-') AS branch_name
+                FROM issue_reports i
+                LEFT JOIN branches b ON b.id = i.branch_id
+                WHERE i.reporter_id = ?
+                   OR i.target_employee_id = ?
+                ORDER BY i.id DESC
+                """,
+                (user["id"], user["id"]),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT i.id,
+                       i.title,
+                       i.details,
+                       i.branch_id,
+                       i.status,
+                       i.escalated_to_ceo,
+                       i.manager_note,
+                       i.created_at,
+                       i.updated_at,
+                       COALESCE(b.name, '-') AS branch_name
+                FROM issue_reports i
+                LEFT JOIN branches b ON b.id = i.branch_id
+                WHERE i.reporter_id = ?
+                ORDER BY i.id DESC
+                """,
+                (user["id"],),
+            ).fetchall()
         conn.close()
         return jsonify([dict(row) for row in rows])
 
@@ -182,16 +204,28 @@ def register_operations_routes(app, deps):
             return error
 
         conn = get_conn()
-        issue = conn.execute(
-            """
-            SELECT id
-            FROM issue_reports
-            WHERE id = ?
-              AND reporter_id = ?
-            LIMIT 1
-            """,
-            (issue_id, user["id"]),
-        ).fetchone()
+                if user["role"] == "employee":
+                        issue = conn.execute(
+                                """
+                                SELECT id
+                                FROM issue_reports
+                                WHERE id = ?
+                                    AND (reporter_id = ? OR target_employee_id = ?)
+                                LIMIT 1
+                                """,
+                                (issue_id, user["id"], user["id"]),
+                        ).fetchone()
+                else:
+                        issue = conn.execute(
+                                """
+                                SELECT id
+                                FROM issue_reports
+                                WHERE id = ?
+                                    AND reporter_id = ?
+                                LIMIT 1
+                                """,
+                                (issue_id, user["id"]),
+                        ).fetchone()
         if not issue:
             conn.close()
             return jsonify({"error": "Issue not found or access denied"}), 404
@@ -1442,15 +1476,6 @@ def register_operations_routes(app, deps):
         schedule_id = body.get("schedule_id")
         note = (body.get("note") or "").strip() or "Quan ly xac nhan vao ca do thieu nhan su"
         
-        # Manager can specify actual check-in time (e.g., when employee arrives late)
-        actual_check_in_time_str = (body.get("actual_check_in_time") or "").strip() or None
-        actual_check_in_dt = None
-        if actual_check_in_time_str:
-            try:
-                actual_check_in_dt = parse_db_datetime(actual_check_in_time_str)
-            except (TypeError, ValueError):
-                return jsonify({"error": "Invalid actual_check_in_time format"}), 400
-
         try:
             schedule_id = int(schedule_id)
         except (TypeError, ValueError):
@@ -1500,14 +1525,18 @@ def register_operations_routes(app, deps):
                 attendance_log_id = open_log["id"]
             else:
                 # Auto-close stale open session so manager override can create a fresh check-in for this shift.
+                now_dt = datetime.now()
+                minutes_worked = 1
+                if open_check_in_dt:
+                    minutes_worked = max(1, int((now_dt - open_check_in_dt).total_seconds() // 60))
                 conn.execute(
                     """
                     UPDATE attendance_logs
                     SET check_out_at = ?,
-                        minutes_worked = COALESCE(minutes_worked, 1)
+                        minutes_worked = ?
                     WHERE id = ?
                     """,
-                    (format_db_datetime(datetime.now()), open_log["id"]),
+                    (format_db_datetime(now_dt), minutes_worked, open_log["id"]),
                 )
 
         if not attendance_log_id:
@@ -1516,7 +1545,7 @@ def register_operations_routes(app, deps):
             scheduled_shift_start_at_str = format_db_datetime(shift_start_dt) if shift_start_dt else None
             
             # Calculate minutes late
-            check_in_dt = actual_check_in_dt if actual_check_in_dt else datetime.now()
+            check_in_dt = datetime.now()
             minutes_late = 0
             if shift_start_dt:
                 minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60))

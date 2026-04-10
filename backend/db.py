@@ -449,6 +449,7 @@ def _init_db_inner():
             reporter_id INTEGER NOT NULL,
             reporter_role TEXT NOT NULL,
             branch_id INTEGER,
+            target_employee_id INTEGER,
             title TEXT NOT NULL,
             details TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_review', 'escalated', 'resolved')),
@@ -457,7 +458,8 @@ def _init_db_inner():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL,
+            FOREIGN KEY (target_employee_id) REFERENCES users(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS issue_report_replies (
@@ -567,6 +569,9 @@ def _init_db_inner():
 
         CREATE INDEX IF NOT EXISTS idx_issue_reports_branch_status
         ON issue_reports(branch_id, status);
+
+        CREATE INDEX IF NOT EXISTS idx_issue_reports_target_employee
+        ON issue_reports(target_employee_id, created_at);
 
         CREATE INDEX IF NOT EXISTS idx_issue_reports_escalated
         ON issue_reports(escalated_to_ceo, created_at);
@@ -906,6 +911,7 @@ def _run_migrations(conn):
             reporter_id INTEGER NOT NULL,
             reporter_role TEXT NOT NULL,
             branch_id INTEGER,
+            target_employee_id INTEGER,
             title TEXT NOT NULL,
             details TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_review', 'escalated', 'resolved')),
@@ -914,10 +920,14 @@ def _run_migrations(conn):
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
+            FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL,
+            FOREIGN KEY (target_employee_id) REFERENCES users(id) ON DELETE SET NULL
         )
         """
     )
+
+    if not _table_has_column(conn, "issue_reports", "target_employee_id"):
+        cur.execute("ALTER TABLE issue_reports ADD COLUMN target_employee_id INTEGER")
 
     cur.execute(
         """
@@ -1016,6 +1026,9 @@ def _run_migrations(conn):
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_issue_reports_branch_status ON issue_reports(branch_id, status)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issue_reports_target_employee ON issue_reports(target_employee_id, created_at)"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_issue_reports_escalated ON issue_reports(escalated_to_ceo, created_at)"

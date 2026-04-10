@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 from collections import deque
 from threading import Lock
@@ -23,6 +24,10 @@ def register_attendance_routes(app, deps):
     build_static_branch_qr_payload = deps["_build_static_branch_qr_payload"]
     build_qr_image_data_url = deps["_build_qr_image_data_url"]
     generate_one_time_attendance_code = deps["_generate_one_time_attendance_code"]
+    shift_definitions = deps["SHIFT_DEFINITIONS"]
+
+    shift_definition_map = {item["code"]: item for item in shift_definitions}
+    auto_checkout_grace_minutes = 10
 
     attendance_qr_one_time_ttl_seconds = deps["ATTENDANCE_QR_ONE_TIME_TTL_SECONDS"]
     attendance_qr_enabled = deps.get("ATTENDANCE_QR_ENABLED", True)
@@ -82,6 +87,211 @@ def register_attendance_routes(app, deps):
             503,
         )
 
+    def _week_start_and_day_for_datetime(current_dt):
+        monday_dt = current_dt - timedelta(days=current_dt.weekday())
+        return monday_dt.strftime("%Y-%m-%d"), current_dt.weekday() + 1
+
+    def _normalize_hhmm(value):
+        text = (value or "").strip()
+        if len(text) != 5 or text[2] != ":":
+            return None
+        hour_text = text[:2]
+        minute_text = text[3:]
+        if not hour_text.isdigit() or not minute_text.isdigit():
+            return None
+        hour = int(hour_text)
+        minute = int(minute_text)
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            return None
+        return f"{hour:02d}:{minute:02d}"
+
+    def _build_daytime_datetime(week_start, day_of_week, hhmm_value):
+        text = _normalize_hhmm(hhmm_value)
+        if not text:
+            return None
+        day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=int(day_of_week) - 1)
+        hour, minute = [int(part) for part in text.split(":")]
+        return day_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def _resolve_shift_window_for_log(conn, attendance_log):
+        check_in_raw = attendance_log.get("check_in_at")
+        branch_id = attendance_log.get("branch_id")
+        employee_id = attendance_log.get("employee_id")
+        if not check_in_raw or not branch_id or not employee_id:
+            return None, None, None
+
+        try:
+            check_in_dt = parse_db_datetime(check_in_raw)
+        except (TypeError, ValueError):
+            return None, None, None
+
+        week_start, day_of_week = _week_start_and_day_for_datetime(check_in_dt)
+        rows = conn.execute(
+            """
+            SELECT shift_code, week_start, day_of_week, flexible_start_at, flexible_end_at
+            FROM weekly_schedule
+            WHERE employee_id = ?
+              AND branch_id = ?
+              AND week_start = ?
+              AND day_of_week = ?
+            ORDER BY shift_code
+            """,
+            (employee_id, branch_id, week_start, day_of_week),
+        ).fetchall()
+        if not rows:
+            return None, None, None
+
+        candidates = []
+        for row in rows:
+            shift_code = row["shift_code"]
+            shift_def = shift_definition_map.get(shift_code)
+            if not shift_def:
+                continue
+
+            if shift_code == "FLEX":
+                start_hhmm = row["flexible_start_at"] or shift_def.get("start")
+                end_hhmm = row["flexible_end_at"] or shift_def.get("end")
+            else:
+                start_hhmm = shift_def.get("start")
+                end_hhmm = shift_def.get("end")
+
+            shift_start_dt = _build_daytime_datetime(row["week_start"], row["day_of_week"], start_hhmm)
+            shift_end_dt = _build_daytime_datetime(row["week_start"], row["day_of_week"], end_hhmm)
+            if not shift_start_dt or not shift_end_dt:
+                continue
+            if shift_end_dt <= shift_start_dt:
+                shift_end_dt += timedelta(days=1)
+
+            in_window = shift_start_dt - timedelta(hours=2) <= check_in_dt <= shift_end_dt + timedelta(hours=2)
+            score = (0 if in_window else 1, abs((check_in_dt - shift_start_dt).total_seconds()))
+            candidates.append((score, shift_code, shift_start_dt, shift_end_dt))
+
+        if not candidates:
+            return None, None, None
+
+        candidates.sort(key=lambda item: item[0])
+        _, shift_code, shift_start_dt, shift_end_dt = candidates[0]
+        return shift_code, shift_start_dt, shift_end_dt
+
+    def _create_auto_checkout_notice(conn, attendance_log, shift_code, check_out_raw):
+        employee_id = int(attendance_log["employee_id"])
+        branch_id = attendance_log["branch_id"]
+        check_in_raw = attendance_log["check_in_at"]
+
+        manager_row = conn.execute(
+            """
+            SELECT id
+            FROM users
+            WHERE role = 'manager'
+              AND branch_id = ?
+              AND COALESCE(is_active, 1) = 1
+            ORDER BY id
+            LIMIT 1
+            """,
+            (branch_id,),
+        ).fetchone()
+
+        reporter_id = int(manager_row["id"]) if manager_row else employee_id
+        reporter_role = "manager" if manager_row else "employee"
+        title = "Thong bao he thong: Tu dong check-out"
+        details = (
+            f"He thong da tu dong check-out sau {auto_checkout_grace_minutes} phut qua gio ket ca "
+            f"({shift_code}). Check-in: {check_in_raw}. Auto check-out: {check_out_raw}."
+        )
+        now_raw = format_db_datetime(datetime.now())
+
+        conn.execute(
+            """
+            INSERT INTO issue_reports(
+                reporter_id,
+                reporter_role,
+                branch_id,
+                target_employee_id,
+                title,
+                details,
+                status,
+                escalated_to_ceo,
+                manager_note,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'in_review', 0, ?, ?, ?)
+            """,
+            (
+                reporter_id,
+                reporter_role,
+                branch_id,
+                employee_id,
+                title,
+                details,
+                "He thong da tu dong check-out do qua gio ket ca",
+                now_raw,
+                now_raw,
+            ),
+        )
+
+    def _auto_checkout_open_logs_for_employee(conn, employee_id=None):
+        now_dt = datetime.now()
+        if employee_id is None:
+            open_logs = conn.execute(
+                """
+                SELECT id, employee_id, branch_id, check_in_at
+                FROM attendance_logs
+                WHERE check_out_at IS NULL
+                ORDER BY id ASC
+                """
+            ).fetchall()
+        else:
+            open_logs = conn.execute(
+                """
+                SELECT id, employee_id, branch_id, check_in_at
+                FROM attendance_logs
+                WHERE employee_id = ?
+                  AND check_out_at IS NULL
+                ORDER BY id ASC
+                """,
+                (employee_id,),
+            ).fetchall()
+
+        auto_closed = 0
+        for log_row in open_logs:
+            if not log_row["branch_id"]:
+                continue
+            try:
+                check_in_dt = parse_db_datetime(log_row["check_in_at"])
+            except (TypeError, ValueError):
+                continue
+
+            shift_code, shift_start_dt, shift_end_dt = _resolve_shift_window_for_log(conn, log_row)
+            if not shift_end_dt:
+                continue
+
+            auto_checkout_dt = shift_end_dt + timedelta(minutes=auto_checkout_grace_minutes)
+            if now_dt <= auto_checkout_dt:
+                continue
+
+            check_out_raw = format_db_datetime(auto_checkout_dt)
+            minutes_worked = max(1, int((auto_checkout_dt - check_in_dt).total_seconds() // 60))
+            updated = conn.execute(
+                """
+                UPDATE attendance_logs
+                SET check_out_at = ?,
+                    minutes_worked = ?
+                WHERE id = ?
+                  AND check_out_at IS NULL
+                """,
+                (check_out_raw, minutes_worked, log_row["id"]),
+            )
+            if (updated.rowcount or 0) < 1:
+                continue
+
+            _create_auto_checkout_notice(conn, log_row, shift_code or "-", check_out_raw)
+            auto_closed += 1
+
+        if auto_closed:
+            conn.commit()
+        return auto_closed
+
     @app.post("/api/attendance/check-in")
     def attendance_check_in():
         user, error = get_user_from_token(roles={"employee", "manager"})
@@ -92,16 +302,8 @@ def register_attendance_routes(app, deps):
         branch_id = body.get("branch_id")
         note = (body.get("note") or "").strip() or None
         
-        # Manager override: có thể ghi lại custom check-in time
-        actual_check_in_time_str = (body.get("actual_check_in_time") or "").strip() or None
-        actual_check_in_dt = None
-        if actual_check_in_time_str and user["role"] == "manager":
-            try:
-                actual_check_in_dt = parse_db_datetime(actual_check_in_time_str)
-            except (TypeError, ValueError):
-                return jsonify({"error": "Invalid actual_check_in_time format"}), 400
-
         conn = get_conn()
+        _auto_checkout_open_logs_for_employee(conn)
         if user["role"] == "manager":
             branch_id = user["branch_id"]
         else:
@@ -135,11 +337,8 @@ def register_attendance_routes(app, deps):
             conn.close()
             return jsonify({"error": "Please check-out current session before new check-in"}), 400
 
-        # Get shift info to calculate scheduled time
-        if actual_check_in_dt:
-            check_in_dt = actual_check_in_dt
-        else:
-            check_in_dt = datetime.now()
+        # Always use server real-time for attendance check-in.
+        check_in_dt = datetime.now()
         
         scheduled_shift_start_at_str = None
         minutes_late = 0
@@ -227,6 +426,7 @@ def register_attendance_routes(app, deps):
             return error
 
         conn = get_conn()
+        _auto_checkout_open_logs_for_employee(conn)
         open_log = conn.execute(
             """
                         SELECT id, check_in_at, confirmed_at
@@ -269,6 +469,7 @@ def register_attendance_routes(app, deps):
 
         now_dt = datetime.now()
         conn = get_conn()
+        _auto_checkout_open_logs_for_employee(conn)
 
         if user["role"] == "manager":
             branch_id = user.get("branch_id")
@@ -339,6 +540,7 @@ def register_attendance_routes(app, deps):
         start_dt, end_dt = week_range(week_start)
 
         conn = get_conn()
+        _auto_checkout_open_logs_for_employee(conn)
         rows = conn.execute(
             """
             SELECT a.id,
@@ -453,6 +655,7 @@ def register_attendance_routes(app, deps):
             return jsonify({"error": token_error}), 400
 
         conn = get_conn()
+        _auto_checkout_open_logs_for_employee(conn)
 
         branch = conn.execute(
             "SELECT id, name, network_ip FROM branches WHERE id = ?",
@@ -630,6 +833,34 @@ def register_attendance_routes(app, deps):
                 }
             ),
             201,
+        )
+
+    @app.get("/api/system/cron/attendance-auto-checkout")
+    def cron_attendance_auto_checkout():
+        expected_secret = (os.getenv("CRON_SECRET") or "").strip()
+        provided_bearer = (request.headers.get("Authorization") or "").strip()
+        provided_query = (request.args.get("secret") or "").strip()
+        is_vercel_cron = bool((request.headers.get("x-vercel-cron") or "").strip())
+
+        authorized = False
+        if expected_secret:
+            authorized = provided_bearer == f"Bearer {expected_secret}" or provided_query == expected_secret
+        elif os.getenv("VERCEL") == "1":
+            authorized = is_vercel_cron
+
+        if not authorized:
+            return jsonify({"error": "Unauthorized cron trigger"}), 401
+
+        conn = get_conn()
+        auto_closed = _auto_checkout_open_logs_for_employee(conn)
+        conn.close()
+        return jsonify(
+            {
+                "message": "Auto checkout scan completed",
+                "auto_closed_count": int(auto_closed or 0),
+                "grace_minutes": auto_checkout_grace_minutes,
+                "server_now": format_db_datetime(datetime.now()),
+            }
         )
 
     @app.post("/api/attendance/scan-qr-one-time")

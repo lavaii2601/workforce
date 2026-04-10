@@ -675,9 +675,15 @@ def create_app():
 
         return True, None
 
-    def _generate_one_time_attendance_code():
+    def _generate_one_time_attendance_code(length=8):
+        try:
+            length = int(length)
+        except (TypeError, ValueError):
+            length = 8
+        if length < 1:
+            length = 1
         alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-        return "".join(secrets.choice(alphabet) for _ in range(8))
+        return "".join(secrets.choice(alphabet) for _ in range(length))
 
     def _build_one_time_qr_payload(branch_id, one_time_code, qr_token):
         return f"WM1|{branch_id}|{one_time_code}|{qr_token}"
@@ -848,6 +854,7 @@ def create_app():
             "_generate_one_time_attendance_code": _generate_one_time_attendance_code,
             "ATTENDANCE_QR_ONE_TIME_TTL_SECONDS": ATTENDANCE_QR_ONE_TIME_TTL_SECONDS,
             "ATTENDANCE_QR_ENABLED": ATTENDANCE_QR_ENABLED,
+            "SHIFT_DEFINITIONS": SHIFT_DEFINITIONS,
         },
     )
 
