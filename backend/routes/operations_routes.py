@@ -20,8 +20,10 @@ def register_operations_routes(app, deps):
     format_db_datetime = deps["_format_db_datetime"]
     upsert_shift_attendance_mark = deps["_upsert_shift_attendance_mark"]
     weekly_hours_rows = deps["_weekly_hours_rows"]
-    csv_response = deps["_csv_response"]
+    weekly_attendance_detail_rows = deps["_weekly_attendance_detail_rows"]
+    csv_sections_response = deps["_csv_sections_response"]
     build_weekly_payroll_csv = deps["_build_weekly_payroll_csv"]
+    build_weekly_payroll_csv_sections = deps["_build_weekly_payroll_csv_sections"]
     manager_can_manage_employee = deps["_manager_can_manage_employee"]
     create_audit_log = deps.get("_create_audit_log")
 
@@ -1928,12 +1930,12 @@ def register_operations_routes(app, deps):
 
         conn = get_conn()
         rows = weekly_hours_rows(conn, week_start, branch_id=user["branch_id"])
+        detail_rows = weekly_attendance_detail_rows(conn, week_start, branch_id=user["branch_id"])
         conn.close()
-        headers, csv_rows = build_weekly_payroll_csv(rows, week_start)
-        return csv_response(
+        sections = build_weekly_payroll_csv_sections(rows, detail_rows, week_start)
+        return csv_sections_response(
             filename=f"payroll_branch_{user['branch_id']}_{week_start}.csv",
-            headers=headers,
-            rows=csv_rows,
+            sections=sections,
         )
 
     @app.get("/api/manager/employees")

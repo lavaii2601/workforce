@@ -502,6 +502,57 @@ def create_app():
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _weekly_attendance_detail_rows(conn, week_start, branch_id=None):
+        start_dt, end_dt = _week_range(week_start)
+        if branch_id:
+            rows = conn.execute(
+                """
+                SELECT a.id AS attendance_id,
+                       u.id AS employee_id,
+                       u.username,
+                       u.display_name AS employee_name,
+                       u.role,
+                       COALESCE(b.name, '-') AS branch_name,
+                       a.check_in_at,
+                       a.check_out_at,
+                       a.scheduled_shift_start_at,
+                       a.minutes_late,
+                       COALESCE(a.minutes_worked, 0) AS minutes_worked
+                FROM attendance_logs a
+                JOIN users u ON u.id = a.employee_id
+                LEFT JOIN branches b ON b.id = a.branch_id
+                WHERE a.branch_id = ?
+                  AND a.check_in_at >= ?
+                  AND a.check_in_at < ?
+                ORDER BY u.display_name, a.check_in_at, a.id
+                """,
+                (branch_id, start_dt, end_dt),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT a.id AS attendance_id,
+                       u.id AS employee_id,
+                       u.username,
+                       u.display_name AS employee_name,
+                       u.role,
+                       COALESCE(b.name, 'Toan he thong') AS branch_name,
+                       a.check_in_at,
+                       a.check_out_at,
+                       a.scheduled_shift_start_at,
+                       a.minutes_late,
+                       COALESCE(a.minutes_worked, 0) AS minutes_worked
+                FROM attendance_logs a
+                JOIN users u ON u.id = a.employee_id
+                LEFT JOIN branches b ON b.id = a.branch_id
+                WHERE a.check_in_at >= ?
+                  AND a.check_in_at < ?
+                ORDER BY u.display_name, a.check_in_at, a.id
+                """,
+                (start_dt, end_dt),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def _csv_response(filename, headers, rows):
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -539,6 +590,97 @@ def create_app():
             for item in rows
         ]
         return headers, csv_rows
+
+    def _csv_sections_response(filename, sections):
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        for section_index, section in enumerate(sections):
+            title = section.get("title")
+            headers = section.get("headers") or []
+            rows = section.get("rows") or []
+            if title:
+                writer.writerow([title])
+            if headers:
+                writer.writerow(headers)
+            for row in rows:
+                writer.writerow(row)
+            if section_index < len(sections) - 1:
+                writer.writerow([])
+        return Response(
+            buf.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
+    def _build_weekly_payroll_csv_sections(summary_rows, detail_rows, week_start):
+        summary_headers = [
+            "employee_id",
+            "username",
+            "employee_name",
+            "role",
+            "branch_scope",
+            "hours_worked",
+            "attendance_sessions",
+            "week_start",
+        ]
+        summary_csv_rows = [
+            [
+                item["employee_id"],
+                item["username"],
+                item["employee_name"],
+                item["role"],
+                item["branch_name"],
+                round(item["total_minutes"] / 60, 2),
+                item["attendance_sessions"],
+                week_start,
+            ]
+            for item in summary_rows
+        ]
+
+        detail_headers = [
+            "attendance_id",
+            "employee_id",
+            "username",
+            "employee_name",
+            "role",
+            "branch_scope",
+            "check_in_at",
+            "check_out_at",
+            "scheduled_shift_start_at",
+            "minutes_late",
+            "minutes_worked",
+            "week_start",
+        ]
+        detail_csv_rows = [
+            [
+                item["attendance_id"],
+                item["employee_id"],
+                item["username"],
+                item["employee_name"],
+                item["role"],
+                item["branch_name"],
+                item["check_in_at"],
+                item["check_out_at"],
+                item["scheduled_shift_start_at"],
+                item["minutes_late"],
+                item["minutes_worked"],
+                week_start,
+            ]
+            for item in detail_rows
+        ]
+
+        return [
+            {
+                "title": "BAO CAO TONG HOP",
+                "headers": summary_headers,
+                "rows": summary_csv_rows,
+            },
+            {
+                "title": "BAO CAO CHI TIET",
+                "headers": detail_headers,
+                "rows": detail_csv_rows,
+            },
+        ]
 
     def _parse_pagination(default_page=1, default_page_size=10, max_page_size=100):
         page_raw = (request.args.get("page") or str(default_page)).strip()
@@ -852,6 +994,7 @@ def create_app():
             "_build_static_branch_qr_payload": _build_static_branch_qr_payload,
             "_build_qr_image_data_url": _build_qr_image_data_url,
             "_generate_one_time_attendance_code": _generate_one_time_attendance_code,
+            "_weekly_attendance_detail_rows": _weekly_attendance_detail_rows,
             "ATTENDANCE_QR_ONE_TIME_TTL_SECONDS": ATTENDANCE_QR_ONE_TIME_TTL_SECONDS,
             "ATTENDANCE_QR_ENABLED": ATTENDANCE_QR_ENABLED,
             "SHIFT_DEFINITIONS": SHIFT_DEFINITIONS,
@@ -871,8 +1014,11 @@ def create_app():
             "_format_db_datetime": _format_db_datetime,
             "_upsert_shift_attendance_mark": _upsert_shift_attendance_mark,
             "_weekly_hours_rows": _weekly_hours_rows,
+            "_weekly_attendance_detail_rows": _weekly_attendance_detail_rows,
             "_csv_response": _csv_response,
+            "_csv_sections_response": _csv_sections_response,
             "_build_weekly_payroll_csv": _build_weekly_payroll_csv,
+            "_build_weekly_payroll_csv_sections": _build_weekly_payroll_csv_sections,
             "_manager_can_manage_employee": _manager_can_manage_employee,
             "_create_audit_log": _create_audit_log,
             "SHIFT_CODE_SET": SHIFT_CODE_SET,
@@ -886,8 +1032,11 @@ def create_app():
             "get_conn": get_conn,
             "_get_user_from_token": _get_user_from_token,
             "_weekly_hours_rows": _weekly_hours_rows,
+            "_weekly_attendance_detail_rows": _weekly_attendance_detail_rows,
             "_csv_response": _csv_response,
+            "_csv_sections_response": _csv_sections_response,
             "_build_weekly_payroll_csv": _build_weekly_payroll_csv,
+            "_build_weekly_payroll_csv_sections": _build_weekly_payroll_csv_sections,
             "_create_audit_log": _create_audit_log,
             "_parse_pagination": _parse_pagination,
             "_is_valid_ipv4": _is_valid_ipv4,

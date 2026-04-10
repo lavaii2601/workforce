@@ -9,8 +9,10 @@ def register_leadership_routes(app, deps):
     get_conn = deps["get_conn"]
     get_user_from_token = deps["_get_user_from_token"]
     weekly_hours_rows = deps["_weekly_hours_rows"]
-    csv_response = deps["_csv_response"]
+    weekly_attendance_detail_rows = deps["_weekly_attendance_detail_rows"]
+    csv_sections_response = deps["_csv_sections_response"]
     build_weekly_payroll_csv = deps["_build_weekly_payroll_csv"]
+    build_weekly_payroll_csv_sections = deps["_build_weekly_payroll_csv_sections"]
     create_audit_log = deps["_create_audit_log"]
     parse_pagination = deps["_parse_pagination"]
     is_valid_ipv4 = deps["_is_valid_ipv4"]
@@ -182,12 +184,12 @@ def register_leadership_routes(app, deps):
             branch_label = str(branch["id"])
 
         rows = weekly_hours_rows(conn, week_start, branch_id=branch_id)
+        detail_rows = weekly_attendance_detail_rows(conn, week_start, branch_id=branch_id)
         conn.close()
-        headers, csv_rows = build_weekly_payroll_csv(rows, week_start)
-        return csv_response(
+        sections = build_weekly_payroll_csv_sections(rows, detail_rows, week_start)
+        return csv_sections_response(
             filename=f"payroll_{branch_label}_{week_start}.csv",
-            headers=headers,
-            rows=csv_rows,
+            sections=sections,
         )
 
     @app.post("/api/ceo/chat")

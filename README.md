@@ -132,6 +132,8 @@ erDiagram
 - Manager: `/api/manager/schedule`, `/api/manager/preferences`, `/api/manager/employees`, `/api/manager/issues`, `/api/manager/payroll-export.csv`.
 - CEO/Admin: `/api/ceo/chat`, `/api/ceo/issues`, `/api/admin/users`, `/api/admin/branches`, `/api/admin/branch-audit-logs`.
 
+- CSV giờ làm: file export gồm 2 phần trong cùng 1 file, một bảng tổng hợp và một bảng chi tiết có `check_in_at`/`check_out_at` để đối chiếu.
+
 ## 8) Cau truc code (sau khi tach)
 
 - `backend/app.py`: bootstrap app + helper dung chung.
