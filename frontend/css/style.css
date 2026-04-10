@@ -1537,7 +1537,39 @@ button.danger {
 }
 
 .csv-preview-note {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+}
+
+.csv-preview-section {
+  border: 1px solid rgba(21, 33, 29, 0.14);
+  border-radius: 12px;
+  padding: 10px;
+  background: linear-gradient(180deg, rgba(250, 255, 252, 0.96), rgba(243, 250, 246, 0.95));
+}
+
+.csv-preview-section + .csv-preview-section {
+  margin-top: 10px;
+}
+
+.csv-preview-title {
+  margin: 0 0 6px;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1rem;
+  letter-spacing: 0.01em;
+}
+
+.csv-preview-meta {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+}
+
+.csv-preview-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid rgba(21, 33, 29, 0.12);
+  border-radius: 10px;
+  background: #fff;
 }
 
 .csv-preview-table {
@@ -1557,6 +1589,30 @@ button.danger {
 .csv-preview-table th {
   background: #eef7f2;
   font-family: "Space Grotesk", sans-serif;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+@media (max-width: 900px) {
+  .csv-preview {
+    padding: 8px;
+  }
+
+  .csv-preview-section {
+    padding: 8px;
+    border-radius: 10px;
+  }
+
+  .csv-preview-title {
+    font-size: 0.95rem;
+  }
+
+  .csv-preview-table th,
+  .csv-preview-table td {
+    padding: 7px 8px;
+    white-space: nowrap;
+  }
 }
 
 .quick-prompts {
@@ -2287,6 +2343,20 @@ body.compact-mode .csv-preview-table th,
 body.compact-mode .csv-preview-table td {
   padding: 6px 8px;
   font-size: 0.82rem;
+}
+
+body.compact-mode .csv-preview-section {
+  padding: 7px;
+}
+
+body.compact-mode .csv-preview-title {
+  font-size: 0.88rem;
+  margin-bottom: 5px;
+}
+
+body.compact-mode .csv-preview-meta,
+body.compact-mode .csv-preview-note {
+  font-size: 0.78rem;
 }
 
 /* === Compact Mode - Profile Modal === */

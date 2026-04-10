@@ -296,7 +296,14 @@ def register_attendance_routes(app, deps):
             if (updated.rowcount or 0) < 1:
                 continue
 
-            _create_auto_checkout_notice(conn, log_row, shift_code or "-", check_out_raw)
+            # Notice creation must never break attendance APIs; isolate it with a savepoint.
+            conn.execute("SAVEPOINT auto_checkout_notice")
+            try:
+                _create_auto_checkout_notice(conn, log_row, shift_code or "-", check_out_raw)
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT auto_checkout_notice")
+            finally:
+                conn.execute("RELEASE SAVEPOINT auto_checkout_notice")
             auto_closed += 1
 
         if auto_closed:

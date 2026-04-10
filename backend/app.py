@@ -567,14 +567,14 @@ def create_app():
 
     def _build_weekly_payroll_csv(rows, week_start):
         headers = [
-            "employee_id",
-            "username",
-            "employee_name",
-            "role",
-            "branch_scope",
-            "hours_worked",
-            "attendance_sessions",
-            "week_start",
+            "ma_nhan_vien",
+            "tai_khoan",
+            "ten_nhan_vien",
+            "vai_tro",
+            "chi_nhanh",
+            "so_gio_lam",
+            "so_phien_cham_cong",
+            "tuan_bat_dau",
         ]
         csv_rows = [
             [
@@ -614,14 +614,14 @@ def create_app():
 
     def _build_weekly_payroll_csv_sections(summary_rows, detail_rows, week_start):
         summary_headers = [
-            "employee_id",
-            "username",
-            "employee_name",
-            "role",
-            "branch_scope",
-            "hours_worked",
-            "attendance_sessions",
-            "week_start",
+            "ma_nhan_vien",
+            "tai_khoan",
+            "ten_nhan_vien",
+            "vai_tro",
+            "chi_nhanh",
+            "so_gio_lam",
+            "so_phien_cham_cong",
+            "tuan_bat_dau",
         ]
         summary_csv_rows = [
             [
@@ -638,18 +638,18 @@ def create_app():
         ]
 
         detail_headers = [
-            "attendance_id",
-            "employee_id",
-            "username",
-            "employee_name",
-            "role",
-            "branch_scope",
-            "check_in_at",
-            "check_out_at",
-            "scheduled_shift_start_at",
-            "minutes_late",
-            "minutes_worked",
-            "week_start",
+            "ma_phien_cham_cong",
+            "ma_nhan_vien",
+            "tai_khoan",
+            "ten_nhan_vien",
+            "vai_tro",
+            "chi_nhanh",
+            "gio_check_in",
+            "gio_check_out",
+            "gio_bat_dau_ca_ke_hoach",
+            "so_phut_di_tre",
+            "so_phut_lam_viec",
+            "tuan_bat_dau",
         ]
         detail_csv_rows = [
             [

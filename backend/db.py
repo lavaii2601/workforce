@@ -600,6 +600,7 @@ def _init_db_inner():
 
     if IS_POSTGRES:
         _execute_postgres_script(cur, schema_sql)
+        _run_postgres_migrations(conn)
     else:
         # Legacy SQLite databases may not have branch_id in old tables yet.
         # Skip branch-dependent indexes here and create them after migrations.
@@ -639,7 +640,39 @@ def _execute_postgres_script(cur, schema_sql):
 
     statements = [segment.strip() for segment in transformed.split(";") if segment.strip()]
     for statement in statements:
-        cur.execute(statement)
+        try:
+            cur.execute(statement)
+        except Exception as exc:
+            # Old Postgres schemas may miss newly added columns referenced by new indexes.
+            sqlstate = getattr(exc, "sqlstate", "")
+            if statement.upper().startswith("CREATE INDEX") and sqlstate in {"42703", "42P01"}:
+                continue
+            raise
+
+
+def _pg_table_has_column(conn, table_name, column_name):
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = %s
+          AND column_name = %s
+        LIMIT 1
+        """,
+        (table_name, column_name),
+    ).fetchone()
+    return bool(row)
+
+
+def _run_postgres_migrations(conn):
+    # Keep Postgres migration minimal and targeted for backwards compatibility.
+    if not _pg_table_has_column(conn, "issue_reports", "target_employee_id"):
+        conn.execute("ALTER TABLE issue_reports ADD COLUMN target_employee_id INTEGER")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issue_reports_target_employee ON issue_reports(target_employee_id, created_at)"
+    )
 
 
 def _table_has_column(conn, table_name, column_name):

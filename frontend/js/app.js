@@ -543,15 +543,20 @@ async function previewCsv(path, containerSelector) {
   root.appendChild(note);
 
   sections.forEach((section) => {
+    const sectionBox = document.createElement("section");
+    sectionBox.className = "csv-preview-section";
+
     if (section.title) {
       const title = document.createElement("h4");
+      title.className = "csv-preview-title";
       title.textContent = section.title;
-      root.appendChild(title);
+      sectionBox.appendChild(title);
     }
 
     const previewRows = section.rows.slice(0, maxRowsPerSection);
     const table = document.createElement("table");
     table.className = "csv-preview-table";
+    table.style.minWidth = `${Math.max(760, section.headers.length * 130)}px`;
 
     const headHtml = section.headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
     const bodyHtml = previewRows
@@ -564,7 +569,21 @@ async function previewCsv(path, containerSelector) {
       .join("");
 
     table.innerHTML = `<thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody>`;
-    root.appendChild(table);
+
+    const sectionMeta = document.createElement("p");
+    sectionMeta.className = "muted csv-preview-meta";
+    sectionMeta.textContent =
+      section.rows.length > maxRowsPerSection
+        ? `Hiển thị ${maxRowsPerSection}/${section.rows.length} dòng trong phần này.`
+        : `Hiển thị ${section.rows.length} dòng trong phần này.`;
+
+    const scrollWrap = document.createElement("div");
+    scrollWrap.className = "csv-preview-scroll";
+    scrollWrap.appendChild(table);
+
+    sectionBox.appendChild(sectionMeta);
+    sectionBox.appendChild(scrollWrap);
+    root.appendChild(sectionBox);
   });
 }
 
