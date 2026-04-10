@@ -204,28 +204,28 @@ def register_operations_routes(app, deps):
             return error
 
         conn = get_conn()
-                if user["role"] == "employee":
-                        issue = conn.execute(
-                                """
-                                SELECT id
-                                FROM issue_reports
-                                WHERE id = ?
-                                    AND (reporter_id = ? OR target_employee_id = ?)
-                                LIMIT 1
-                                """,
-                                (issue_id, user["id"], user["id"]),
-                        ).fetchone()
-                else:
-                        issue = conn.execute(
-                                """
-                                SELECT id
-                                FROM issue_reports
-                                WHERE id = ?
-                                    AND reporter_id = ?
-                                LIMIT 1
-                                """,
-                                (issue_id, user["id"]),
-                        ).fetchone()
+        if user["role"] == "employee":
+            issue = conn.execute(
+                """
+                SELECT id
+                FROM issue_reports
+                WHERE id = ?
+                  AND (reporter_id = ? OR target_employee_id = ?)
+                LIMIT 1
+                """,
+                (issue_id, user["id"], user["id"]),
+            ).fetchone()
+        else:
+            issue = conn.execute(
+                """
+                SELECT id
+                FROM issue_reports
+                WHERE id = ?
+                  AND reporter_id = ?
+                LIMIT 1
+                """,
+                (issue_id, user["id"]),
+            ).fetchone()
         if not issue:
             conn.close()
             return jsonify({"error": "Issue not found or access denied"}), 404
