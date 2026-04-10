@@ -114,9 +114,20 @@ def register_attendance_routes(app, deps):
         return day_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     def _resolve_shift_window_for_log(conn, attendance_log):
-        check_in_raw = attendance_log.get("check_in_at")
-        branch_id = attendance_log.get("branch_id")
-        employee_id = attendance_log.get("employee_id")
+        if attendance_log is None:
+            return None, None, None
+
+        def _row_value(row_obj, key):
+            if isinstance(row_obj, dict):
+                return row_obj.get(key)
+            try:
+                return row_obj[key]
+            except (KeyError, TypeError, IndexError):
+                return None
+
+        check_in_raw = _row_value(attendance_log, "check_in_at")
+        branch_id = _row_value(attendance_log, "branch_id")
+        employee_id = _row_value(attendance_log, "employee_id")
         if not check_in_raw or not branch_id or not employee_id:
             return None, None, None
 

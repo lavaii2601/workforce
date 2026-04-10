@@ -1512,68 +1512,59 @@ def register_operations_routes(app, deps):
             (schedule["employee_id"], schedule["branch_id"]),
         ).fetchone()
 
-        attendance_log_id = None
         if open_log:
-            schedule_day_dt = datetime.strptime(schedule["week_start"], "%Y-%m-%d") + timedelta(
-                days=int(schedule["day_of_week"]) - 1
-            )
+            # Close any existing open session first; manager override must start a fresh real-time session.
+            now_dt = datetime.now()
+            minutes_worked = 1
             try:
                 open_check_in_dt = parse_db_datetime(open_log["check_in_at"])
             except (TypeError, ValueError):
                 open_check_in_dt = None
-
-            if open_check_in_dt and open_check_in_dt.date() == schedule_day_dt.date():
-                # Reuse same-day open session as employee's active check-in.
-                attendance_log_id = open_log["id"]
-            else:
-                # Auto-close stale open session so manager override can create a fresh check-in for this shift.
-                now_dt = datetime.now()
-                minutes_worked = 1
-                if open_check_in_dt:
-                    minutes_worked = max(1, int((now_dt - open_check_in_dt).total_seconds() // 60))
-                conn.execute(
-                    """
-                    UPDATE attendance_logs
-                    SET check_out_at = ?,
-                        minutes_worked = ?
-                    WHERE id = ?
-                    """,
-                    (format_db_datetime(now_dt), minutes_worked, open_log["id"]),
-                )
-
-        if not attendance_log_id:
-            # Calculate scheduled shift start time
-            shift_start_dt = shift_start_datetime(schedule["week_start"], schedule["day_of_week"], schedule["shift_code"])
-            scheduled_shift_start_at_str = format_db_datetime(shift_start_dt) if shift_start_dt else None
-            
-            # Calculate minutes late
-            check_in_dt = datetime.now()
-            minutes_late = 0
-            if shift_start_dt:
-                minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60))
-            
-            cur = conn.execute(
+            if open_check_in_dt:
+                minutes_worked = max(1, int((now_dt - open_check_in_dt).total_seconds() // 60))
+            conn.execute(
                 """
-                INSERT INTO attendance_logs(
-                    employee_id, branch_id, check_in_at, confirmed_at, 
-                    scheduled_shift_start_at, minutes_late, 
-                    checked_in_by_manager_id, manager_check_in_note, note
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                UPDATE attendance_logs
+                SET check_out_at = ?,
+                    minutes_worked = ?
+                WHERE id = ?
+                  AND check_out_at IS NULL
                 """,
-                (
-                    schedule["employee_id"],
-                    schedule["branch_id"],
-                    format_db_datetime(check_in_dt),
-                    format_db_datetime(check_in_dt),
-                    scheduled_shift_start_at_str,
-                    minutes_late,
-                    user["id"],
-                    note,
-                    "Manager override - thieu nhan su",
-                ),
+                (format_db_datetime(now_dt), minutes_worked, open_log["id"]),
             )
-            attendance_log_id = cur.lastrowid
+
+        # Calculate scheduled shift start time
+        shift_start_dt = shift_start_datetime(schedule["week_start"], schedule["day_of_week"], schedule["shift_code"])
+        scheduled_shift_start_at_str = format_db_datetime(shift_start_dt) if shift_start_dt else None
+
+        # Manager override check-in must use server real-time at action time.
+        check_in_dt = datetime.now()
+        minutes_late = 0
+        if shift_start_dt:
+            minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60))
+
+        cur = conn.execute(
+            """
+            INSERT INTO attendance_logs(
+                employee_id, branch_id, check_in_at, confirmed_at,
+                scheduled_shift_start_at, minutes_late,
+                checked_in_by_manager_id, manager_check_in_note, note
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                schedule["employee_id"],
+                schedule["branch_id"],
+                format_db_datetime(check_in_dt),
+                format_db_datetime(check_in_dt),
+                scheduled_shift_start_at_str,
+                minutes_late,
+                user["id"],
+                note,
+                "Manager override - thieu nhan su",
+            ),
+        )
+        attendance_log_id = cur.lastrowid
 
         upsert_shift_attendance_mark(
             conn,

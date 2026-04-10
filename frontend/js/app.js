@@ -473,19 +473,45 @@ function parseCsvLine(line) {
   return out;
 }
 
-function parseCsv(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+function parseCsvSections(text) {
+  const lines = text.split(/\r?\n/);
+  const sections = [];
+  let idx = 0;
 
-  if (!lines.length) {
-    return { headers: [], rows: [] };
+  while (idx < lines.length) {
+    while (idx < lines.length && !lines[idx].trim()) idx += 1;
+    if (idx >= lines.length) break;
+
+    const firstCells = parseCsvLine(lines[idx]);
+    const secondLine = idx + 1 < lines.length ? lines[idx + 1] : "";
+    const secondCells = parseCsvLine(secondLine);
+
+    let title = "";
+    let headers = [];
+
+    // New format: title row + header row.
+    if (firstCells.length === 1 && secondLine.trim() && secondCells.length > 1) {
+      title = (firstCells[0] || "").trim();
+      headers = secondCells;
+      idx += 2;
+    } else {
+      // Backward-compatible format: plain single table.
+      headers = firstCells;
+      idx += 1;
+    }
+
+    const rows = [];
+    while (idx < lines.length && lines[idx].trim()) {
+      rows.push(parseCsvLine(lines[idx]));
+      idx += 1;
+    }
+
+    if (headers.length) {
+      sections.push({ title, headers, rows });
+    }
   }
 
-  const headers = parseCsvLine(lines[0]);
-  const rows = lines.slice(1).map((line) => parseCsvLine(line));
-  return { headers, rows };
+  return sections;
 }
 
 async function previewCsv(path, containerSelector) {
@@ -494,34 +520,52 @@ async function previewCsv(path, containerSelector) {
   root.innerHTML = "<p class='muted'>Đang tải dữ liệu xem trước...</p>";
 
   const text = await fetchCsvText(path);
-  const parsed = parseCsv(text);
-  if (!parsed.headers.length) {
+  const sections = parseCsvSections(text);
+  if (!sections.length) {
     root.innerHTML = "<p class='muted'>Không có dữ liệu để xem trước.</p>";
     return;
   }
 
-  const maxRows = 12;
-  const previewRows = parsed.rows.slice(0, maxRows);
-  const table = document.createElement("table");
-  table.className = "csv-preview-table";
-
-  const headHtml = parsed.headers.map((h) => `<th>${h}</th>`).join("");
-  const bodyHtml = previewRows
-    .map((row) => `<tr>${parsed.headers.map((_, i) => `<td>${row[i] || ""}</td>`).join("")}</tr>`)
-    .join("");
-
-  table.innerHTML = `<thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody>`;
+  root.innerHTML = "";
+  const maxRowsPerSection = 12;
+  const totalRows = sections.reduce((sum, section) => sum + section.rows.length, 0);
+  const totalShown = sections.reduce(
+    (sum, section) => sum + Math.min(section.rows.length, maxRowsPerSection),
+    0
+  );
 
   const note = document.createElement("p");
   note.className = "muted csv-preview-note";
   note.textContent =
-    parsed.rows.length > maxRows
-      ? `Đang hiển thị ${maxRows}/${parsed.rows.length} dòng. Bấm Tải CSV để lấy đầy đủ.`
-      : `Đang hiển thị ${parsed.rows.length} dòng.`;
-
-  root.innerHTML = "";
+    totalRows > totalShown
+      ? `Đang hiển thị ${totalShown}/${totalRows} dòng. Bấm Tải CSV để lấy đầy đủ.`
+      : `Đang hiển thị ${totalRows} dòng.`;
   root.appendChild(note);
-  root.appendChild(table);
+
+  sections.forEach((section) => {
+    if (section.title) {
+      const title = document.createElement("h4");
+      title.textContent = section.title;
+      root.appendChild(title);
+    }
+
+    const previewRows = section.rows.slice(0, maxRowsPerSection);
+    const table = document.createElement("table");
+    table.className = "csv-preview-table";
+
+    const headHtml = section.headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+    const bodyHtml = previewRows
+      .map(
+        (row) =>
+          `<tr>${section.headers
+            .map((_, i) => `<td>${escapeHtml(String(row[i] || ""))}</td>`)
+            .join("")}</tr>`
+      )
+      .join("");
+
+    table.innerHTML = `<thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody>`;
+    root.appendChild(table);
+  });
 }
 
 function roleLabel(role) {
