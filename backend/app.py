@@ -85,8 +85,15 @@ def create_app():
         "localhost",
         "127.0.0.1",
     }
+    if IS_VERCEL:
+        # Allow Vercel deployment/preview aliases by default.
+        allowed_hosts.add("*.vercel.app")
     if VERCEL_URL:
         allowed_hosts.add(VERCEL_URL)
+    for vercel_host_key in ("VERCEL_BRANCH_URL", "VERCEL_PROJECT_PRODUCTION_URL"):
+        vercel_host = (os.getenv(vercel_host_key) or "").strip().lower()
+        if vercel_host:
+            allowed_hosts.add(vercel_host)
     configured_allowed_hosts = {
         host.strip().lower()
         for host in (os.getenv("ALLOWED_HOSTS") or "").split(",")
