@@ -19,6 +19,19 @@ def register_leadership_routes(app, deps):
     build_branch_create_audit_details = deps["_build_branch_create_audit_details"]
     build_branch_update_audit_details = deps["_build_branch_update_audit_details"]
     build_branch_delete_audit_details = deps["_build_branch_delete_audit_details"]
+    read_cache_get = deps.get("_read_cache_get")
+    read_cache_set = deps.get("_read_cache_set")
+    read_cache_invalidate = deps.get("_read_cache_invalidate")
+
+    def _cache_fetch(cache_key, ttl_seconds, loader):
+        if read_cache_get and read_cache_set:
+            cached = read_cache_get(cache_key)
+            if cached is not None:
+                return cached
+        payload = loader()
+        if read_cache_set:
+            read_cache_set(cache_key, payload, ttl_seconds=ttl_seconds)
+        return payload
 
     def _is_valid_week_start(value):
         try:
@@ -52,33 +65,37 @@ def register_leadership_routes(app, deps):
 
     @app.get("/api/ceo/issues")
     def ceo_issues():
-        _, error = get_user_from_token(roles={"ceo"})
+        user, error = get_user_from_token(roles={"ceo"})
         if error:
             return error
 
-        conn = get_conn()
-        rows = conn.execute(
-            """
-            SELECT i.id,
-                   i.title,
-                   i.details,
-                   i.status,
-                   i.escalated_to_ceo,
-                   i.manager_note,
-                   i.created_at,
-                   i.updated_at,
-                   u.display_name AS reporter_name,
-                   u.role AS reporter_role,
-                   COALESCE(b.name, '-') AS branch_name
-            FROM issue_reports i
-            JOIN users u ON u.id = i.reporter_id
-            LEFT JOIN branches b ON b.id = i.branch_id
-            WHERE i.escalated_to_ceo = 1 OR i.status = 'escalated'
-            ORDER BY i.id DESC
-            """
-        ).fetchall()
-        conn.close()
-        return jsonify([dict(row) for row in rows])
+        def _load_payload():
+            conn = get_conn()
+            rows = conn.execute(
+                """
+                SELECT i.id,
+                       i.title,
+                       i.details,
+                       i.status,
+                       i.escalated_to_ceo,
+                       i.manager_note,
+                       i.created_at,
+                       i.updated_at,
+                       u.display_name AS reporter_name,
+                       u.role AS reporter_role,
+                       COALESCE(b.name, '-') AS branch_name
+                FROM issue_reports i
+                JOIN users u ON u.id = i.reporter_id
+                LEFT JOIN branches b ON b.id = i.branch_id
+                WHERE i.escalated_to_ceo = 1 OR i.status = 'escalated'
+                ORDER BY i.id DESC
+                """
+            ).fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+
+        payload = _cache_fetch(f"ceo:issues:u:{user['id']}", 8, _load_payload)
+        return jsonify(payload)
 
     @app.get("/api/ceo/issues/<int:issue_id>/replies")
     def ceo_issue_replies(issue_id):
@@ -158,6 +175,8 @@ def register_leadership_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("ceo:issues:", "manager:issues:"))
         return jsonify({"message": "Reply posted"}), 201
 
     @app.get("/api/ceo/payroll-export.csv")
@@ -262,33 +281,35 @@ def register_leadership_routes(app, deps):
 
     @app.get("/api/admin/users")
     def admin_users():
-        _, error = get_user_from_token(roles={"ceo"})
+        user, error = get_user_from_token(roles={"ceo"})
         if error:
             return error
 
-        conn = get_conn()
-        users = conn.execute(
-            """
-            SELECT u.id,
-                   u.username,
-                   u.display_name,
-                   u.role,
-                   u.branch_id,
-                   u.is_active,
-                   b.name AS branch_name
-            FROM users u
-            LEFT JOIN branches b ON b.id = u.branch_id
-            ORDER BY u.role, u.display_name
-            """
-        ).fetchall()
-        branches = conn.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
-        conn.close()
-        return jsonify(
-            {
+        def _load_payload():
+            conn = get_conn()
+            users = conn.execute(
+                """
+                SELECT u.id,
+                       u.username,
+                       u.display_name,
+                       u.role,
+                       u.branch_id,
+                       u.is_active,
+                       b.name AS branch_name
+                FROM users u
+                LEFT JOIN branches b ON b.id = u.branch_id
+                ORDER BY u.role, u.display_name
+                """
+            ).fetchall()
+            branches = conn.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
+            conn.close()
+            return {
                 "users": [dict(row) for row in users],
                 "branches": [dict(row) for row in branches],
             }
-        )
+
+        payload = _cache_fetch(f"admin:users:u:{user['id']}", 10, _load_payload)
+        return jsonify(payload)
 
     @app.post("/api/admin/users")
     def admin_create_user():
@@ -372,6 +393,8 @@ def register_leadership_routes(app, deps):
             )
             conn.commit()
             conn.close()
+            if read_cache_invalidate:
+                read_cache_invalidate(("admin:users:", "admin:branches:"))
             return jsonify({"message": "User created", "user_id": cur.lastrowid}), 201
 
         if not isinstance(branch_ids, list) or not branch_ids:
@@ -421,6 +444,8 @@ def register_leadership_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("admin:users:", "admin:branches:"))
         return jsonify({"message": "User created", "user_id": employee_id}), 201
 
     @app.put("/api/admin/users/<int:user_id>")
@@ -497,6 +522,8 @@ def register_leadership_routes(app, deps):
 
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("admin:users:", "admin:branches:"))
         return jsonify({"message": "User updated"})
 
     @app.delete("/api/admin/users/<int:user_id>")
@@ -536,11 +563,13 @@ def register_leadership_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("admin:users:", "admin:branches:"))
         return jsonify({"message": "User deleted"})
 
     @app.get("/api/admin/branches")
     def admin_list_branches():
-        _, error = get_user_from_token(roles={"ceo"})
+        user, error = get_user_from_token(roles={"ceo"})
         if error:
             return error
 
@@ -555,47 +584,49 @@ def register_leadership_routes(app, deps):
             where_clause = "WHERE b.name LIKE ? COLLATE NOCASE"
             params.append(f"%{query}%")
 
-        conn = get_conn()
-        total = conn.execute(
-            f"""
-            SELECT COUNT(*) AS c
-            FROM branches b
-            {where_clause}
-            """,
-            tuple(params),
-        ).fetchone()["c"]
+        cache_key = f"admin:branches:u:{user['id']}:q:{query}:p:{page}:ps:{page_size}"
 
-        offset = (page - 1) * page_size
-        rows = conn.execute(
-            f"""
-            SELECT b.id,
-                   b.name,
-                   b.location,
-                   b.network_ip,
-                   COALESCE(mgr.manager_count, 0) AS manager_count,
-                   COALESCE(emp.employee_count, 0) AS employee_count
-            FROM branches b
-            LEFT JOIN (
-                SELECT branch_id, COUNT(*) AS manager_count
-                FROM users
-                WHERE role = 'manager'
-                GROUP BY branch_id
-            ) mgr ON mgr.branch_id = b.id
-            LEFT JOIN (
-                SELECT branch_id, COUNT(DISTINCT employee_id) AS employee_count
-                FROM employee_branch_access
-                GROUP BY branch_id
-            ) emp ON emp.branch_id = b.id
-            {where_clause}
-            ORDER BY b.name
-            LIMIT ? OFFSET ?
-            """,
-            tuple(params + [page_size, offset]),
-        ).fetchall()
-        conn.close()
+        def _load_payload():
+            conn = get_conn()
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*) AS c
+                FROM branches b
+                {where_clause}
+                """,
+                tuple(params),
+            ).fetchone()["c"]
 
-        return jsonify(
-            {
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                f"""
+                SELECT b.id,
+                       b.name,
+                       b.location,
+                       b.network_ip,
+                       COALESCE(mgr.manager_count, 0) AS manager_count,
+                       COALESCE(emp.employee_count, 0) AS employee_count
+                FROM branches b
+                LEFT JOIN (
+                    SELECT branch_id, COUNT(*) AS manager_count
+                    FROM users
+                    WHERE role = 'manager'
+                    GROUP BY branch_id
+                ) mgr ON mgr.branch_id = b.id
+                LEFT JOIN (
+                    SELECT branch_id, COUNT(DISTINCT employee_id) AS employee_count
+                    FROM employee_branch_access
+                    GROUP BY branch_id
+                ) emp ON emp.branch_id = b.id
+                {where_clause}
+                ORDER BY b.name
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params + [page_size, offset]),
+            ).fetchall()
+            conn.close()
+
+            return {
                 "items": [dict(row) for row in rows],
                 "pagination": {
                     "page": page,
@@ -605,7 +636,9 @@ def register_leadership_routes(app, deps):
                 },
                 "query": query,
             }
-        )
+
+        payload = _cache_fetch(cache_key, 8, _load_payload)
+        return jsonify(payload)
 
     @app.post("/api/admin/branches")
     def admin_create_branch():
@@ -642,6 +675,8 @@ def register_leadership_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("admin:branches:", "admin:users:"))
         return jsonify({"message": "Branch created", "branch_id": cur.lastrowid}), 201
 
     @app.put("/api/admin/branches/<int:branch_id>")
@@ -700,6 +735,8 @@ def register_leadership_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("admin:branches:", "admin:users:"))
         return jsonify({"message": "Branch updated"})
 
     @app.get("/api/admin/branches/<int:branch_id>/employees")
@@ -798,11 +835,13 @@ def register_leadership_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("admin:branches:", "admin:users:"))
         return jsonify({"message": "Branch deleted"})
 
     @app.get("/api/admin/branch-audit-logs")
     def admin_branch_audit_logs():
-        _, error = get_user_from_token(roles={"ceo"})
+        user, error = get_user_from_token(roles={"ceo"})
         if error:
             return error
 
@@ -824,33 +863,35 @@ def register_leadership_routes(app, deps):
             where_clause += " AND al.target_id = ?"
             params.append(branch_id)
 
-        conn = get_conn()
-        total = conn.execute(
-            f"SELECT COUNT(*) AS c FROM audit_logs al {where_clause}",
-            tuple(params),
-        ).fetchone()["c"]
+        cache_key = f"admin:audit:u:{user['id']}:branch:{branch_id or 'all'}:p:{page}:ps:{page_size}"
 
-        offset = (page - 1) * page_size
-        rows = conn.execute(
-            f"""
-            SELECT al.id,
-                   al.actor_user_id,
-                   al.actor_username,
-                   al.action,
-                   al.target_id,
-                   al.details,
-                   al.created_at
-            FROM audit_logs al
-            {where_clause}
-            ORDER BY al.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            tuple(params + [page_size, offset]),
-        ).fetchall()
-        conn.close()
+        def _load_payload():
+            conn = get_conn()
+            total = conn.execute(
+                f"SELECT COUNT(*) AS c FROM audit_logs al {where_clause}",
+                tuple(params),
+            ).fetchone()["c"]
 
-        return jsonify(
-            {
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                f"""
+                SELECT al.id,
+                       al.actor_user_id,
+                       al.actor_username,
+                       al.action,
+                       al.target_id,
+                       al.details,
+                       al.created_at
+                FROM audit_logs al
+                {where_clause}
+                ORDER BY al.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params + [page_size, offset]),
+            ).fetchall()
+            conn.close()
+
+            return {
                 "items": [dict(row) for row in rows],
                 "pagination": {
                     "page": page,
@@ -859,4 +900,6 @@ def register_leadership_routes(app, deps):
                     "total_pages": max(1, (total + page_size - 1) // page_size),
                 },
             }
-        )
+
+        payload = _cache_fetch(cache_key, 8, _load_payload)
+        return jsonify(payload)

@@ -7,6 +7,7 @@ import os
 import re
 import hmac
 import hashlib
+from time import perf_counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -31,6 +32,9 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 # Global cache for expensive read endpoints
 META_CACHE = {"data": None, "expires_at": 0}
 META_CACHE_TTL_SECONDS = 300  # 5 minutes
+READ_API_CACHE = {}
+READ_API_CACHE_LOCK = Lock()
+READ_API_CACHE_MAX_ITEMS = 1024
 TOKEN_LIFETIME_DAYS = 7
 DEFAULT_STATELESS_SESSION_SECRET = "workforce-session-secret"
 DEFAULT_ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
@@ -88,6 +92,8 @@ def create_app():
     SHIFT_DEFINITION_MAP = {item["code"]: item for item in SHIFT_DEFINITIONS}
     LOGIN_WINDOW_SECONDS = 10 * 60
     LOGIN_MAX_FAILURES = 5
+    API_SLOW_LOG_MS = max(50, int(os.getenv("API_SLOW_LOG_MS", "250") or "250"))
+    API_LOG_ALL_REQUESTS = os.getenv("API_LOG_ALL_REQUESTS") == "1"
     login_attempts_lock = Lock()
     login_attempts = {}
     allowed_hosts = {
@@ -152,8 +158,59 @@ def create_app():
             if key in login_attempts:
                 del login_attempts[key]
 
+    def _read_cache_get(cache_key):
+        if not cache_key:
+            return None
+        now_ts = datetime.utcnow().timestamp()
+        with READ_API_CACHE_LOCK:
+            item = READ_API_CACHE.get(cache_key)
+            if not item:
+                return None
+            if item["expires_at"] <= now_ts:
+                READ_API_CACHE.pop(cache_key, None)
+                return None
+            return item["payload"]
+
+    def _read_cache_set(cache_key, payload, ttl_seconds=10):
+        if not cache_key:
+            return
+        ttl = max(1, int(ttl_seconds or 1))
+        now_ts = datetime.utcnow().timestamp()
+        expires_at = now_ts + ttl
+        with READ_API_CACHE_LOCK:
+            READ_API_CACHE[cache_key] = {
+                "payload": payload,
+                "expires_at": expires_at,
+            }
+            if len(READ_API_CACHE) > READ_API_CACHE_MAX_ITEMS:
+                expired_keys = [
+                    key for key, value in READ_API_CACHE.items() if value.get("expires_at", 0) <= now_ts
+                ]
+                for key in expired_keys:
+                    READ_API_CACHE.pop(key, None)
+                while len(READ_API_CACHE) > READ_API_CACHE_MAX_ITEMS:
+                    first_key = next(iter(READ_API_CACHE), None)
+                    if first_key is None:
+                        break
+                    READ_API_CACHE.pop(first_key, None)
+
+    def _read_cache_invalidate(prefixes=None):
+        with READ_API_CACHE_LOCK:
+            if not prefixes:
+                READ_API_CACHE.clear()
+                return
+            normalized = [str(prefix) for prefix in prefixes if prefix]
+            if not normalized:
+                return
+            keys_to_remove = [
+                key for key in READ_API_CACHE.keys() if any(key.startswith(prefix) for prefix in normalized)
+            ]
+            for key in keys_to_remove:
+                READ_API_CACHE.pop(key, None)
+
     @app.before_request
     def _reject_invalid_json_requests():
+        request.environ["wm_perf_start"] = perf_counter()
         host = (request.host or "").split(":", 1)[0].strip().lower()
         if host_header_enforced and host and not _host_is_allowed(host):
             return jsonify({"error": "Invalid host header"}), 400
@@ -204,6 +261,33 @@ def create_app():
             "form-action 'self'"
         )
         response.headers["Content-Security-Policy"] = csp
+
+        path = request.path or ""
+        if path.startswith("/api/"):
+            started_at = request.environ.get("wm_perf_start")
+            if isinstance(started_at, (int, float)):
+                duration_ms = max(0.0, (perf_counter() - started_at) * 1000.0)
+                response.headers["X-Response-Time-Ms"] = str(int(round(duration_ms)))
+
+                method = request.method
+                query = (request.query_string or b"").decode("utf-8", errors="ignore")
+                path_with_query = f"{path}?{query}" if query else path
+                if duration_ms >= API_SLOW_LOG_MS:
+                    app.logger.warning(
+                        "slow_api method=%s path=%s status=%s duration_ms=%.1f",
+                        method,
+                        path_with_query,
+                        response.status_code,
+                        duration_ms,
+                    )
+                elif API_LOG_ALL_REQUESTS:
+                    app.logger.info(
+                        "api method=%s path=%s status=%s duration_ms=%.1f",
+                        method,
+                        path_with_query,
+                        response.status_code,
+                        duration_ms,
+                    )
         return response
 
     @app.errorhandler(RequestEntityTooLarge)
@@ -1089,6 +1173,9 @@ def create_app():
             "_build_weekly_payroll_csv_sections": _build_weekly_payroll_csv_sections,
             "_manager_can_manage_employee": _manager_can_manage_employee,
             "_create_audit_log": _create_audit_log,
+            "_read_cache_get": _read_cache_get,
+            "_read_cache_set": _read_cache_set,
+            "_read_cache_invalidate": _read_cache_invalidate,
             "SHIFT_CODE_SET": SHIFT_CODE_SET,
             "SHIFT_DEFINITIONS": SHIFT_DEFINITIONS,
         },
@@ -1111,6 +1198,9 @@ def create_app():
             "_build_branch_create_audit_details": _build_branch_create_audit_details,
             "_build_branch_update_audit_details": _build_branch_update_audit_details,
             "_build_branch_delete_audit_details": _build_branch_delete_audit_details,
+            "_read_cache_get": _read_cache_get,
+            "_read_cache_set": _read_cache_set,
+            "_read_cache_invalidate": _read_cache_invalidate,
         },
     )
 

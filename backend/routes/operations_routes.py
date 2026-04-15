@@ -26,9 +26,22 @@ def register_operations_routes(app, deps):
     build_weekly_payroll_csv_sections = deps["_build_weekly_payroll_csv_sections"]
     manager_can_manage_employee = deps["_manager_can_manage_employee"]
     create_audit_log = deps.get("_create_audit_log")
+    read_cache_get = deps.get("_read_cache_get")
+    read_cache_set = deps.get("_read_cache_set")
+    read_cache_invalidate = deps.get("_read_cache_invalidate")
 
     shift_code_set = deps["SHIFT_CODE_SET"]
     shift_definitions = deps["SHIFT_DEFINITIONS"]
+
+    def _cache_fetch(cache_key, ttl_seconds, loader):
+        if read_cache_get and read_cache_set:
+            cached = read_cache_get(cache_key)
+            if cached is not None:
+                return cached
+        payload = loader()
+        if read_cache_set:
+            read_cache_set(cache_key, payload, ttl_seconds=ttl_seconds)
+        return payload
 
     def _normalize_registration_type(value):
         text = (value or "individual").strip().lower()
@@ -1237,6 +1250,8 @@ def register_operations_routes(app, deps):
 
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:schedule:", "manager:schedule-rev:", "manager:attendance-shifts:"))
         return jsonify(
             {
                 "message": "Weekly schedule saved",
@@ -1313,6 +1328,8 @@ def register_operations_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:schedule:", "manager:staffing-rules:"))
 
         return jsonify({"message": "Staffing rules updated", "count": len(normalized)})
 
@@ -1326,34 +1343,39 @@ def register_operations_routes(app, deps):
         if not week_start:
             return jsonify({"error": "week_start is required"}), 400
 
-        conn = get_conn()
-        rows = conn.execute(
-            """
-            SELECT ws.id,
-                   ws.employee_id,
-                   u.display_name AS employee_name,
-                   ws.shift_code,
-                   ws.day_of_week,
-                     ws.registration_type,
-                     ws.group_code,
-                     ws.flexible_start_at,
-                     ws.flexible_end_at,
-                   ws.week_start,
-                   ws.branch_id,
-                   b.name AS branch_name
-            FROM weekly_schedule ws
-            JOIN users u ON u.id = ws.employee_id
-            JOIN branches b ON b.id = ws.branch_id
-            WHERE ws.week_start = ?
-              AND ws.branch_id = ?
-            ORDER BY ws.day_of_week, ws.shift_code, u.display_name
-            """,
-            (week_start, user["branch_id"]),
-        ).fetchall()
-        payload = [dict(row) for row in rows]
+                cache_key = f"manager:schedule:u:{user['id']}:b:{user['branch_id']}:w:{week_start}"
+
+                def _load_payload():
+                        conn = get_conn()
+                        rows = conn.execute(
+                                """
+                                SELECT ws.id,
+                                             ws.employee_id,
+                                             u.display_name AS employee_name,
+                                             ws.shift_code,
+                                             ws.day_of_week,
+                                                 ws.registration_type,
+                                                 ws.group_code,
+                                                 ws.flexible_start_at,
+                                                 ws.flexible_end_at,
+                                             ws.week_start,
+                                             ws.branch_id,
+                                             b.name AS branch_name
+                                FROM weekly_schedule ws
+                                JOIN users u ON u.id = ws.employee_id
+                                JOIN branches b ON b.id = ws.branch_id
+                                WHERE ws.week_start = ?
+                                    AND ws.branch_id = ?
+                                ORDER BY ws.day_of_week, ws.shift_code, u.display_name
+                                """,
+                                (week_start, user["branch_id"]),
+                        ).fetchall()
+                        conn.close()
+                        return [dict(row) for row in rows]
+
+                payload = _cache_fetch(cache_key, 8, _load_payload)
         response = jsonify(payload)
         response.headers["X-Schedule-Revision"] = _schedule_revision(payload)
-        conn.close()
 
         return response
 
@@ -1367,17 +1389,21 @@ def register_operations_routes(app, deps):
         if not week_start:
             return jsonify({"error": "week_start is required"}), 400
 
-        conn = get_conn()
-        rows = _schedule_rows_for_branch_week(conn, week_start, user["branch_id"])
-        conn.close()
-        return jsonify(
-            {
+        cache_key = f"manager:schedule-rev:u:{user['id']}:b:{user['branch_id']}:w:{week_start}"
+
+        def _load_payload():
+            conn = get_conn()
+            rows = _schedule_rows_for_branch_week(conn, week_start, user["branch_id"])
+            conn.close()
+            return {
                 "week_start": week_start,
                 "branch_id": user["branch_id"],
                 "schedule_revision": _schedule_revision(rows),
                 "count": len(rows),
             }
-        )
+
+        payload = _cache_fetch(cache_key, 8, _load_payload)
+        return jsonify(payload)
 
     @app.get("/api/manager/attendance-shifts/today")
     def manager_attendance_shifts_today():
@@ -1388,108 +1414,112 @@ def register_operations_routes(app, deps):
         current_dt = datetime.now()
         week_start, day_of_week = week_start_and_day_for_datetime(current_dt)
 
-        conn = get_conn()
-        rows = conn.execute(
-            """
-            SELECT ws.id AS schedule_id,
-                   ws.week_start,
-                   ws.day_of_week,
-                   ws.shift_code,
-                     ws.flexible_start_at,
-                     ws.flexible_end_at,
-                   ws.branch_id,
-                   ws.employee_id,
-                   u.display_name AS employee_name,
-                   m.status,
-                   m.source,
-                   m.note,
-                   m.updated_at,
-                   m.marked_by_manager_id,
-                     m.attendance_log_id,
-                     al.check_in_at AS attendance_check_in_at,
-                     al.check_out_at AS attendance_check_out_at
-            FROM weekly_schedule ws
-            JOIN users u ON u.id = ws.employee_id
-            LEFT JOIN shift_attendance_marks m
-                   ON m.week_start = ws.week_start
-                  AND m.day_of_week = ws.day_of_week
-                  AND m.shift_code = ws.shift_code
-                  AND m.branch_id = ws.branch_id
-                  AND m.employee_id = ws.employee_id
-                 LEFT JOIN attendance_logs al
-                     ON al.id = m.attendance_log_id
-            WHERE ws.branch_id = ?
-              AND ws.week_start = ?
-              AND ws.day_of_week = ?
-            ORDER BY ws.shift_code, u.display_name
-            """,
-            (user["branch_id"], week_start, day_of_week),
-        ).fetchall()
-        conn.close()
+        cache_key = f"manager:attendance-shifts:u:{user['id']}:b:{user['branch_id']}:w:{week_start}:d:{day_of_week}"
 
-        items = []
-        for row in rows:
-            if row["shift_code"] == "FLEX":
-                start_dt = _flex_shift_start_datetime(
-                    row["week_start"], row["day_of_week"], row["flexible_start_at"]
+        def _load_payload():
+            conn = get_conn()
+            rows = conn.execute(
+                """
+                SELECT ws.id AS schedule_id,
+                       ws.week_start,
+                       ws.day_of_week,
+                       ws.shift_code,
+                         ws.flexible_start_at,
+                         ws.flexible_end_at,
+                       ws.branch_id,
+                       ws.employee_id,
+                       u.display_name AS employee_name,
+                       m.status,
+                       m.source,
+                       m.note,
+                       m.updated_at,
+                       m.marked_by_manager_id,
+                         m.attendance_log_id,
+                         al.check_in_at AS attendance_check_in_at,
+                         al.check_out_at AS attendance_check_out_at
+                FROM weekly_schedule ws
+                JOIN users u ON u.id = ws.employee_id
+                LEFT JOIN shift_attendance_marks m
+                       ON m.week_start = ws.week_start
+                      AND m.day_of_week = ws.day_of_week
+                      AND m.shift_code = ws.shift_code
+                      AND m.branch_id = ws.branch_id
+                      AND m.employee_id = ws.employee_id
+                     LEFT JOIN attendance_logs al
+                         ON al.id = m.attendance_log_id
+                WHERE ws.branch_id = ?
+                  AND ws.week_start = ?
+                  AND ws.day_of_week = ?
+                ORDER BY ws.shift_code, u.display_name
+                """,
+                (user["branch_id"], week_start, day_of_week),
+            ).fetchall()
+            conn.close()
+
+            items = []
+            for row in rows:
+                if row["shift_code"] == "FLEX":
+                    start_dt = _flex_shift_start_datetime(
+                        row["week_start"], row["day_of_week"], row["flexible_start_at"]
+                    )
+                else:
+                    start_dt = shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
+                if not start_dt:
+                    continue
+                late_deadline_dt = start_dt + timedelta(minutes=15)
+                status = row["status"]
+                if not status:
+                    status = "late_unmarked" if current_dt > late_deadline_dt else "pending"
+
+                check_in_raw = row["attendance_check_in_at"]
+                late_minutes = 0
+                if check_in_raw:
+                    try:
+                        check_in_dt = parse_db_datetime(str(check_in_raw))
+                        if check_in_dt > start_dt:
+                            late_minutes = int((check_in_dt - start_dt).total_seconds() // 60)
+                    except (TypeError, ValueError):
+                        late_minutes = 0
+
+                is_late_shortage_override = (
+                    status == "present_override"
+                    and (row["source"] or "") == "manager_override_shortage"
+                    and late_minutes > 0
                 )
-            else:
-                start_dt = shift_start_datetime(row["week_start"], row["day_of_week"], row["shift_code"])
-            if not start_dt:
-                continue
-            late_deadline_dt = start_dt + timedelta(minutes=15)
-            status = row["status"]
-            if not status:
-                status = "late_unmarked" if current_dt > late_deadline_dt else "pending"
 
-            check_in_raw = row["attendance_check_in_at"]
-            late_minutes = 0
-            if check_in_raw:
-                try:
-                    check_in_dt = parse_db_datetime(str(check_in_raw))
-                    if check_in_dt > start_dt:
-                        late_minutes = int((check_in_dt - start_dt).total_seconds() // 60)
-                except (TypeError, ValueError):
-                    late_minutes = 0
+                items.append(
+                    {
+                        "schedule_id": row["schedule_id"],
+                        "week_start": row["week_start"],
+                        "day_of_week": row["day_of_week"],
+                        "shift_code": row["shift_code"],
+                        "flexible_start_at": row["flexible_start_at"],
+                        "flexible_end_at": row["flexible_end_at"],
+                        "employee_id": row["employee_id"],
+                        "employee_name": row["employee_name"],
+                        "status": status,
+                        "source": row["source"] or "",
+                        "note": row["note"] or "",
+                        "attendance_log_id": row["attendance_log_id"],
+                        "attendance_check_in_at": row["attendance_check_in_at"],
+                        "attendance_check_out_at": row["attendance_check_out_at"],
+                        "shift_start_at": format_db_datetime(start_dt),
+                        "late_deadline_at": format_db_datetime(late_deadline_dt),
+                        "late_minutes": late_minutes,
+                        "is_late_shortage_override": is_late_shortage_override,
+                        "updated_at": row["updated_at"],
+                    }
+                )
 
-            is_late_shortage_override = (
-                status == "present_override"
-                and (row["source"] or "") == "manager_override_shortage"
-                and late_minutes > 0
-            )
-
-            items.append(
-                {
-                    "schedule_id": row["schedule_id"],
-                    "week_start": row["week_start"],
-                    "day_of_week": row["day_of_week"],
-                    "shift_code": row["shift_code"],
-                    "flexible_start_at": row["flexible_start_at"],
-                    "flexible_end_at": row["flexible_end_at"],
-                    "employee_id": row["employee_id"],
-                    "employee_name": row["employee_name"],
-                    "status": status,
-                    "source": row["source"] or "",
-                    "note": row["note"] or "",
-                    "attendance_log_id": row["attendance_log_id"],
-                    "attendance_check_in_at": row["attendance_check_in_at"],
-                    "attendance_check_out_at": row["attendance_check_out_at"],
-                    "shift_start_at": format_db_datetime(start_dt),
-                    "late_deadline_at": format_db_datetime(late_deadline_dt),
-                    "late_minutes": late_minutes,
-                    "is_late_shortage_override": is_late_shortage_override,
-                    "updated_at": row["updated_at"],
-                }
-            )
-
-        return jsonify(
-            {
+            return {
                 "server_now": format_db_datetime(current_dt),
                 "week_start": week_start,
                 "day_of_week": day_of_week,
                 "items": items,
             }
-        )
+
+        payload = _cache_fetch(cache_key, 6, _load_payload)
+        return jsonify(payload)
 
     @app.put("/api/manager/attendance-shifts/override")
     def manager_attendance_shift_override():
@@ -1604,6 +1634,8 @@ def register_operations_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:attendance-shifts:", "manager:schedule:", "manager:schedule-rev:"))
 
         return jsonify({"message": "Đã cập nhật trạng thái: đã đi làm", "attendance_log_id": attendance_log_id})
 
@@ -1758,30 +1790,34 @@ def register_operations_routes(app, deps):
         if error:
             return error
 
-        conn = get_conn()
-        rows = conn.execute(
-            """
-            SELECT i.id,
-                   i.title,
-                   i.details,
-                   i.status,
-                   i.escalated_to_ceo,
-                   i.manager_note,
-                   i.created_at,
-                   i.updated_at,
-                   u.display_name AS reporter_name,
-                   u.role AS reporter_role,
-                   COALESCE(b.name, '-') AS branch_name
-            FROM issue_reports i
-            JOIN users u ON u.id = i.reporter_id
-            LEFT JOIN branches b ON b.id = i.branch_id
-            WHERE i.branch_id = ?
-            ORDER BY i.id DESC
-            """,
-            (user["branch_id"],),
-        ).fetchall()
-        conn.close()
-        return jsonify([dict(row) for row in rows])
+        def _load_payload():
+            conn = get_conn()
+            rows = conn.execute(
+                """
+                SELECT i.id,
+                       i.title,
+                       i.details,
+                       i.status,
+                       i.escalated_to_ceo,
+                       i.manager_note,
+                       i.created_at,
+                       i.updated_at,
+                       u.display_name AS reporter_name,
+                       u.role AS reporter_role,
+                       COALESCE(b.name, '-') AS branch_name
+                FROM issue_reports i
+                JOIN users u ON u.id = i.reporter_id
+                LEFT JOIN branches b ON b.id = i.branch_id
+                WHERE i.branch_id = ?
+                ORDER BY i.id DESC
+                """,
+                (user["branch_id"],),
+            ).fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+
+        payload = _cache_fetch(f"manager:issues:u:{user['id']}:b:{user['branch_id']}", 8, _load_payload)
+        return jsonify(payload)
 
     @app.post("/api/manager/issues/report-ceo")
     def manager_report_ceo():
@@ -1813,6 +1849,8 @@ def register_operations_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:issues:", "ceo:issues:"))
         return jsonify({"message": "Manager report sent to CEO", "issue_id": cur.lastrowid}), 201
 
     @app.get("/api/manager/issues/<int:issue_id>/replies")
@@ -1888,6 +1926,8 @@ def register_operations_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:issues:", "ceo:issues:"))
         return jsonify({"message": "Reply posted"}), 201
 
     @app.put("/api/manager/issues/<int:issue_id>")
@@ -1930,6 +1970,8 @@ def register_operations_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:issues:", "ceo:issues:"))
         return jsonify({"message": "Issue updated"})
 
     @app.get("/api/manager/payroll-export.csv")
@@ -1962,86 +2004,90 @@ def register_operations_routes(app, deps):
 
         keyword = (request.args.get("q") or "").strip()
 
-        conn = get_conn()
-        sql = """
-            SELECT u.id,
-                   u.username,
-                   u.display_name,
-                   u.full_name,
-                   u.phone_number,
-                   u.address,
-                   u.date_of_birth,
-                   u.job_position,
-                   u.is_active,
-                   GROUP_CONCAT(b.name, ', ') AS branch_names,
-                   GROUP_CONCAT(eba.branch_id, ',') AS branch_ids
-            FROM users u
-            JOIN employee_branch_access eba ON eba.employee_id = u.id
-            JOIN branches b ON b.id = eba.branch_id
-            WHERE u.role = 'employee'
-              AND u.id IN (
-                  SELECT employee_id FROM employee_branch_access WHERE branch_id = ?
-              )
-        """
-        params = [user["branch_id"]]
-        if keyword:
+        cache_key = f"manager:employees:u:{user['id']}:b:{user['branch_id']}:q:{keyword}"
+
+        def _load_payload():
+            conn = get_conn()
+            sql = """
+                SELECT u.id,
+                       u.username,
+                       u.display_name,
+                       u.full_name,
+                       u.phone_number,
+                       u.address,
+                       u.date_of_birth,
+                       u.job_position,
+                       u.is_active,
+                       GROUP_CONCAT(b.name, ', ') AS branch_names,
+                       GROUP_CONCAT(eba.branch_id, ',') AS branch_ids
+                FROM users u
+                JOIN employee_branch_access eba ON eba.employee_id = u.id
+                JOIN branches b ON b.id = eba.branch_id
+                WHERE u.role = 'employee'
+                  AND u.id IN (
+                      SELECT employee_id FROM employee_branch_access WHERE branch_id = ?
+                  )
+            """
+            params = [user["branch_id"]]
+            if keyword:
+                sql += """
+                  AND (
+                              u.username LIKE ? COLLATE NOCASE
+                          OR u.display_name LIKE ? COLLATE NOCASE
+                          OR COALESCE(u.full_name, '') LIKE ? COLLATE NOCASE
+                          OR COALESCE(u.phone_number, '') LIKE ? COLLATE NOCASE
+                  )
+                """
+                like_kw = f"%{keyword}%"
+                params.extend([like_kw, like_kw, like_kw, like_kw])
+
             sql += """
-              AND (
-                          u.username LIKE ? COLLATE NOCASE
-                      OR u.display_name LIKE ? COLLATE NOCASE
-                      OR COALESCE(u.full_name, '') LIKE ? COLLATE NOCASE
-                      OR COALESCE(u.phone_number, '') LIKE ? COLLATE NOCASE
-              )
+                GROUP BY u.id,
+                         u.username,
+                         u.display_name,
+                         u.full_name,
+                         u.phone_number,
+                         u.address,
+                         u.date_of_birth,
+                         u.job_position,
+                         u.is_active
+                ORDER BY u.display_name
             """
-            like_kw = f"%{keyword}%"
-            params.extend([like_kw, like_kw, like_kw, like_kw])
+            rows = conn.execute(sql, tuple(params)).fetchall()
 
-        sql += """
-            GROUP BY u.id,
-                     u.username,
-                     u.display_name,
-                     u.full_name,
-                     u.phone_number,
-                     u.address,
-                     u.date_of_birth,
-                     u.job_position,
-                     u.is_active
-            ORDER BY u.display_name
-        """
-        rows = conn.execute(sql, tuple(params)).fetchall()
+            branch_rows = conn.execute(
+                """
+                SELECT b.id, b.name
+                FROM branches b
+                WHERE b.id = ?
+                ORDER BY b.name
+                """,
+                (user["branch_id"],),
+            ).fetchall()
 
-        branch_rows = conn.execute(
-            """
-            SELECT b.id, b.name
-            FROM branches b
-            WHERE b.id = ?
-            ORDER BY b.name
-            """,
-            (user["branch_id"],),
-        ).fetchall()
+            conn.close()
 
-        conn.close()
+            employees = []
+            for row in rows:
+                item = dict(row)
+                item["branch_names"] = [name.strip() for name in (item.get("branch_names") or "").split(",") if name.strip()]
+                item["branch_ids"] = [
+                    int(branch_id)
+                    for branch_id in (item.get("branch_ids") or "").split(",")
+                    if branch_id.strip().isdigit()
+                ]
+                item["contact_ready"] = bool((item.get("phone_number") or "").strip())
+                item["avatar_url"] = f"/api/manager/employees/{item['id']}/avatar"
+                employees.append(item)
 
-        employees = []
-        for row in rows:
-            item = dict(row)
-            item["branch_names"] = [name.strip() for name in (item.get("branch_names") or "").split(",") if name.strip()]
-            item["branch_ids"] = [
-                int(branch_id)
-                for branch_id in (item.get("branch_ids") or "").split(",")
-                if branch_id.strip().isdigit()
-            ]
-            item["contact_ready"] = bool((item.get("phone_number") or "").strip())
-            item["avatar_url"] = f"/api/manager/employees/{item['id']}/avatar"
-            employees.append(item)
-
-        return jsonify(
-            {
+            return {
                 "employees": employees,
                 "branches": [dict(row) for row in branch_rows],
                 "default_branch_ids": [user["branch_id"]],
             }
-        )
+
+        payload = _cache_fetch(cache_key, 10, _load_payload)
+        return jsonify(payload)
 
     @app.get("/api/manager/employees/<int:employee_id>/avatar")
     def manager_employee_avatar(employee_id):
@@ -2141,6 +2187,8 @@ def register_operations_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:employees:", "admin:users:", "admin:branches:"))
         return jsonify({"message": "Employee account created", "employee_id": employee_id}), 201
 
     @app.put("/api/manager/employees/<int:employee_id>")
@@ -2215,6 +2263,8 @@ def register_operations_routes(app, deps):
         )
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:employees:", "admin:users:"))
         return jsonify({"message": "Employee profile updated"})
 
     @app.delete("/api/manager/employees/<int:employee_id>")
@@ -2241,4 +2291,6 @@ def register_operations_routes(app, deps):
         conn.execute("DELETE FROM users WHERE id = ?", (employee_id,))
         conn.commit()
         conn.close()
+        if read_cache_invalidate:
+            read_cache_invalidate(("manager:employees:", "admin:users:", "admin:branches:"))
         return jsonify({"message": "Employee account deleted"})
