@@ -173,7 +173,10 @@ def create_app():
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
 
         path = request.path or ""
-        if path.startswith("/api/"):
+        if path == "/api/meta":
+            # Metadata changes infrequently; allow short-lived shared caching.
+            response.headers["Cache-Control"] = "public, max-age=60, stale-while-revalidate=300"
+        elif path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"
         elif path == "/sw.js":

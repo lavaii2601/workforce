@@ -376,12 +376,20 @@ def register_general_routes(app, deps):
 
         payload = dict(user)
         if payload["role"] == "manager" and payload["branch_id"]:
-            conn = get_conn()
-            branch = conn.execute(
-                "SELECT id, name FROM branches WHERE id = ?", (payload["branch_id"],)
-            ).fetchone()
-            conn.close()
-            payload["branch"] = dict(branch) if branch else None
+            branch = None
+            if meta_cache and meta_cache.get("data"):
+                for item in meta_cache["data"].get("branches", []):
+                    if int(item.get("id", 0)) == int(payload["branch_id"]):
+                        branch = item
+                        break
+            if not branch:
+                conn = get_conn()
+                row = conn.execute(
+                    "SELECT id, name FROM branches WHERE id = ?", (payload["branch_id"],)
+                ).fetchone()
+                conn.close()
+                branch = dict(row) if row else None
+            payload["branch"] = branch
         return jsonify({"user": payload})
 
     @app.get("/api/server-time")

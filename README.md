@@ -179,6 +179,38 @@ Vi vay khong the luu DB lau dai tren Vercel bang file SQLite.
 - Host security: `ALLOWED_HOSTS` (danh sach host hop le, phan tach boi dau phay; can dat khi dung custom domain).
 - OpenJarvis: `OPENJARVIS_ENABLED`, `OPENJARVIS_API_URL`, `OPENJARVIS_API_KEY`, `OPENJARVIS_MODEL`, `OPENJARVIS_TIMEOUT_SECONDS`, `OPENJARVIS_TEMPERATURE`, `OPENJARVIS_MAX_TOKENS`.
 
+Setup OpenRouter (de dung cho OpenJarvis):
+- `OPENJARVIS_ENABLED=1`
+- `OPENJARVIS_API_URL=https://openrouter.ai/api`
+- `OPENJARVIS_API_KEY=<OPENROUTER_API_KEY>`
+- `OPENJARVIS_MODEL=<ten_model_openrouter>` (vd: `openai/gpt-4o-mini` hoac model ban dang dung)
+- Khuyen nghi them header danh tinh app:
+	- `OPENJARVIS_HTTP_REFERER=https://ten-domain-cua-ban`
+	- `OPENJARVIS_APP_TITLE=Workforce Manager`
+
+Tuong thich alias env (neu ban quen tay dat theo OpenRouter):
+- `OPENROUTER_SITE_URL` (tuong duong `OPENJARVIS_HTTP_REFERER`)
+- `OPENROUTER_APP_NAME` (tuong duong `OPENJARVIS_APP_TITLE`)
+
+Vi du nhanh:
+
+```env
+OPENJARVIS_ENABLED=1
+OPENJARVIS_API_URL=https://openrouter.ai/api
+OPENJARVIS_API_KEY=sk-or-v1-xxxxx
+OPENJARVIS_MODEL=openai/gpt-4o-mini
+OPENJARVIS_TIMEOUT_SECONDS=8
+OPENJARVIS_TEMPERATURE=0.2
+OPENJARVIS_MAX_TOKENS=700
+OPENJARVIS_HTTP_REFERER=https://your-domain.vercel.app
+OPENJARVIS_APP_TITLE=Workforce Manager
+```
+
+Toi uu thoi gian phan hoi giua tinh nang:
+- Frontend da co cache ngan cho cac API GET mang tinh danh sach (`/api/admin/users`, `/api/admin/branches`, `/api/admin/branch-audit-logs`) de giam request lap lai khi chuyen tab nhanh.
+- Frontend da chong request trung lap khi cung mot API dang duoc goi dong thoi.
+- Moi request ghi du lieu (POST/PUT/DELETE) se xoa cache GET de dam bao du lieu cap nhat ngay.
+
 ## 12) Setup Supabase (nhanh)
 
 1. Tao project Supabase va vao SQL Editor.
@@ -192,6 +224,11 @@ Vi vay khong the luu DB lau dai tren Vercel bang file SQLite.
 Goi y production Vercel:
 - Dat `ALLOWED_HOSTS` de tranh Host Header Injection (vd: `your-domain.com,*.vercel.app` theo domain ban su dung).
 - Root page (`/`) da duoc phuc vu static + cache ngan; file CSS/JS/Icon cache immutable de giam TTFB va tai lai nhanh hon.
+
+Quy uoc cap nhat DB cho team:
+- Xem `supabase/schema.sql` la nguon chuan cho Supabase.
+- Moi thay doi lien quan database (table/column/index/constraint) phai cap nhat trong `supabase/schema.sql` truoc.
+- Sau do copy/paste schema moi vao Supabase SQL Editor de migrate thu cong.
 
 ## 13) Ghi chu nhanh cho team
 

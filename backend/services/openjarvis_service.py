@@ -29,6 +29,16 @@ def _as_int(value, default):
 def _openjarvis_config():
     base_url = (os.getenv("OPENJARVIS_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
     enabled = (os.getenv("OPENJARVIS_ENABLED") or "1").strip().lower() not in {"0", "false", "no", "off"}
+    referer = (
+        os.getenv("OPENJARVIS_HTTP_REFERER")
+        or os.getenv("OPENROUTER_SITE_URL")
+        or ""
+    ).strip()
+    app_title = (
+        os.getenv("OPENJARVIS_APP_TITLE")
+        or os.getenv("OPENROUTER_APP_NAME")
+        or ""
+    ).strip()
     return {
         "enabled": enabled,
         "base_url": base_url,
@@ -37,6 +47,8 @@ def _openjarvis_config():
         "temperature": _as_float(os.getenv("OPENJARVIS_TEMPERATURE"), 0.2),
         "max_tokens": _as_int(os.getenv("OPENJARVIS_MAX_TOKENS"), 700),
         "timeout_seconds": _as_float(os.getenv("OPENJARVIS_TIMEOUT_SECONDS"), 6.0),
+        "http_referer": referer,
+        "app_title": app_title,
     }
 
 
@@ -233,6 +245,10 @@ def _call_openjarvis_chat(*, messages, config):
     headers = {"Content-Type": "application/json"}
     if config.get("api_key"):
         headers["Authorization"] = f"Bearer {config['api_key']}"
+    if config.get("http_referer"):
+        headers["HTTP-Referer"] = config["http_referer"]
+    if config.get("app_title"):
+        headers["X-Title"] = config["app_title"]
 
     req = urlrequest.Request(
         f"{config['base_url']}/v1/chat/completions",

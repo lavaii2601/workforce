@@ -266,6 +266,36 @@ CREATE TABLE IF NOT EXISTS branch_shift_requirements (
     FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
 );
 
+-- Backward-compatible migration block for existing Supabase databases.
+-- Keep this block updated whenever schema columns change in code.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_data_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS date_of_birth TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS job_position TEXT;
+
+ALTER TABLE ceo_chat_messages ADD COLUMN IF NOT EXISTS sender_type TEXT DEFAULT 'user';
+ALTER TABLE ceo_chat_messages ADD COLUMN IF NOT EXISTS sender_label TEXT;
+
+ALTER TABLE shift_preferences ADD COLUMN IF NOT EXISTS day_of_week INTEGER DEFAULT 0;
+ALTER TABLE shift_preferences ADD COLUMN IF NOT EXISTS registration_type TEXT DEFAULT 'individual';
+ALTER TABLE shift_preferences ADD COLUMN IF NOT EXISTS group_code TEXT;
+ALTER TABLE shift_preferences ADD COLUMN IF NOT EXISTS flexible_start_at TEXT;
+ALTER TABLE shift_preferences ADD COLUMN IF NOT EXISTS flexible_end_at TEXT;
+
+ALTER TABLE weekly_schedule ADD COLUMN IF NOT EXISTS day_of_week INTEGER DEFAULT 0;
+ALTER TABLE weekly_schedule ADD COLUMN IF NOT EXISTS registration_type TEXT DEFAULT 'individual';
+ALTER TABLE weekly_schedule ADD COLUMN IF NOT EXISTS group_code TEXT;
+ALTER TABLE weekly_schedule ADD COLUMN IF NOT EXISTS flexible_start_at TEXT;
+ALTER TABLE weekly_schedule ADD COLUMN IF NOT EXISTS flexible_end_at TEXT;
+
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS confirmed_at TEXT;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS scheduled_shift_start_at TEXT;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS minutes_late INTEGER DEFAULT 0;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS checked_in_by_manager_id INTEGER;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS manager_check_in_note TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_employee_branch_access_branch_employee
 ON employee_branch_access(branch_id, employee_id);
 

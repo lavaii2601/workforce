@@ -3876,10 +3876,6 @@ async function login() {
   });
   state.token = payload.token;
   state.currentUser = payload.user;
-  if (state.currentUser.role === "manager") {
-    const cur = await api("/api/current-user");
-    state.currentUser = cur.user;
-  }
   persistSession();
   setShellByAuth();
   if (shouldRequireProfileCompletion()) {
@@ -4323,7 +4319,6 @@ async function bootstrap() {
     await loadProfileRequiredForm();
   }
   if (state.currentUser) {
-    await ensureAppMetaLoaded();
     ensureValidRoute();
     await renderRoute();
   }
