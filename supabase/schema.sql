@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS issue_reports (
     reporter_id INTEGER NOT NULL,
     reporter_role TEXT NOT NULL,
     branch_id INTEGER,
+    target_employee_id INTEGER,
     title TEXT NOT NULL,
     details TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_review', 'escalated', 'resolved')),
@@ -208,8 +209,30 @@ CREATE TABLE IF NOT EXISTS issue_reports (
     created_at TEXT NOT NULL DEFAULT (to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     updated_at TEXT NOT NULL DEFAULT (to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
     FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_employee_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL
 );
+
+-- Backward-compatible migration for existing Supabase projects.
+ALTER TABLE issue_reports
+ADD COLUMN IF NOT EXISTS target_employee_id INTEGER;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        WHERE t.relname = 'issue_reports'
+          AND c.contype = 'f'
+          AND pg_get_constraintdef(c.oid) ILIKE '%(target_employee_id)%REFERENCES users(id)%'
+    ) THEN
+        ALTER TABLE issue_reports
+        ADD CONSTRAINT fk_issue_reports_target_employee
+        FOREIGN KEY (target_employee_id) REFERENCES users(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS issue_report_replies (
     id SERIAL PRIMARY KEY,
@@ -319,6 +342,9 @@ ON shift_attendance_marks(employee_id, week_start, day_of_week, shift_code);
 
 CREATE INDEX IF NOT EXISTS idx_issue_reports_branch_status
 ON issue_reports(branch_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_issue_reports_target_employee
+ON issue_reports(target_employee_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_issue_reports_escalated
 ON issue_reports(escalated_to_ceo, created_at);
