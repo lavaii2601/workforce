@@ -147,6 +147,8 @@ def _prepare_database_url(url):
 
 DATABASE_URL = _prepare_database_url(_resolve_database_url())
 IS_POSTGRES = bool(DATABASE_URL)
+POSTGRES_HOSTNAME = urlparse(DATABASE_URL).hostname if IS_POSTGRES else None
+POSTGRES_HOSTADDR = _resolve_host_to_ipv4(POSTGRES_HOSTNAME) if POSTGRES_HOSTNAME else None
 
 
 def is_postgres_backend():
@@ -280,16 +282,9 @@ def get_conn(*, autocommit=False):
             "row_factory": dict_row,
             "autocommit": autocommit,
         }
-        # Resolve hostname to IPv4 — Vercel Lambda does not support IPv6
-        try:
-            parsed = urlparse(DATABASE_URL)
-            hostname = parsed.hostname
-            if hostname:
-                ipv4 = _resolve_host_to_ipv4(hostname)
-                if ipv4:
-                    connect_kwargs["hostaddr"] = ipv4
-        except Exception:
-            pass
+        # Reuse cached IPv4 hostaddr to avoid DNS lookup on every request.
+        if POSTGRES_HOSTADDR:
+            connect_kwargs["hostaddr"] = POSTGRES_HOSTADDR
         pg_conn = psycopg.connect(**connect_kwargs)
         return _PgConnAdapter(pg_conn)
 
