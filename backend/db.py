@@ -6,9 +6,6 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
-import psycopg
-from psycopg.rows import dict_row
-
 from werkzeug.security import generate_password_hash
 from .constants import SHIFT_DEFINITIONS
 
@@ -211,6 +208,15 @@ DB_PATH = _resolve_db_path()
 
 def get_conn(*, autocommit=False):
     if IS_POSTGRES:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "Postgres backend selected but psycopg is unavailable. "
+                "Ensure dependencies include psycopg and psycopg-binary for serverless runtime."
+            ) from exc
+
         connect_kwargs = {
             "conninfo": DATABASE_URL,
             "row_factory": dict_row,
