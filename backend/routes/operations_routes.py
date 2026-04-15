@@ -1343,37 +1343,37 @@ def register_operations_routes(app, deps):
         if not week_start:
             return jsonify({"error": "week_start is required"}), 400
 
-                cache_key = f"manager:schedule:u:{user['id']}:b:{user['branch_id']}:w:{week_start}"
+        cache_key = f"manager:schedule:u:{user['id']}:b:{user['branch_id']}:w:{week_start}"
 
-                def _load_payload():
-                        conn = get_conn()
-                        rows = conn.execute(
-                                """
-                                SELECT ws.id,
-                                             ws.employee_id,
-                                             u.display_name AS employee_name,
-                                             ws.shift_code,
-                                             ws.day_of_week,
-                                                 ws.registration_type,
-                                                 ws.group_code,
-                                                 ws.flexible_start_at,
-                                                 ws.flexible_end_at,
-                                             ws.week_start,
-                                             ws.branch_id,
-                                             b.name AS branch_name
-                                FROM weekly_schedule ws
-                                JOIN users u ON u.id = ws.employee_id
-                                JOIN branches b ON b.id = ws.branch_id
-                                WHERE ws.week_start = ?
-                                    AND ws.branch_id = ?
-                                ORDER BY ws.day_of_week, ws.shift_code, u.display_name
-                                """,
-                                (week_start, user["branch_id"]),
-                        ).fetchall()
-                        conn.close()
-                        return [dict(row) for row in rows]
+        def _load_payload():
+            conn = get_conn()
+            rows = conn.execute(
+                """
+                SELECT ws.id,
+                       ws.employee_id,
+                       u.display_name AS employee_name,
+                       ws.shift_code,
+                       ws.day_of_week,
+                       ws.registration_type,
+                       ws.group_code,
+                       ws.flexible_start_at,
+                       ws.flexible_end_at,
+                       ws.week_start,
+                       ws.branch_id,
+                       b.name AS branch_name
+                FROM weekly_schedule ws
+                JOIN users u ON u.id = ws.employee_id
+                JOIN branches b ON b.id = ws.branch_id
+                WHERE ws.week_start = ?
+                  AND ws.branch_id = ?
+                ORDER BY ws.day_of_week, ws.shift_code, u.display_name
+                """,
+                (week_start, user["branch_id"]),
+            ).fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
 
-                payload = _cache_fetch(cache_key, 8, _load_payload)
+        payload = _cache_fetch(cache_key, 8, _load_payload)
         response = jsonify(payload)
         response.headers["X-Schedule-Revision"] = _schedule_revision(payload)
 
