@@ -71,6 +71,8 @@ let employeeOneTimeCountdownTimerId = null;
 let employeeQrCameraStream = null;
 let employeeQrCameraLoopId = null;
 let employeeQrDetectInProgress = false;
+let appMetaLoadPromise = null;
+const loadedRoutes = new Set();  // Track which routes have already fetched their data
 
 const WEEK_DAYS = [1, 2, 3, 4, 5, 6, 7];
 const SMALL_SHIFT_CODES = ["S1", "S2", "S3", "S4"];
@@ -80,7 +82,7 @@ const PROFILE_AVATAR_MAX_DATA_URL_LENGTH = 350000;
 const PROFILE_AVATAR_MAX_DIMENSION = 640;
 const API_MESSAGE_REPLACEMENTS = [
   ["Request failed", "Yêu cầu thất bại"],
-  ["Missing access token", "Thiếu mã truy cập"],
+  ["Missing access token", "Bạn chưa đăng nhập hoặc phiên đã hết hạn"],
   ["Invalid or expired session", "Phiên đăng nhập không hợp lệ hoặc đã hết hạn"],
   ["Please check-out current session before new check-in", "Vui lòng check-out ca hiện tại trước khi check-in mới"],
   ["No open attendance session to check-out", "Không có phiên chấm công đang mở để check-out"],
@@ -92,6 +94,9 @@ const API_MESSAGE_REPLACEMENTS = [
   ["User not found", "Không tìm thấy người dùng"],
   ["username already exists", "Tên đăng nhập đã tồn tại"],
 ];
+
+const API_GET_CACHE = new Map();
+const API_GET_INFLIGHT = new Map();
 
 const ROUTES = {
   employee: [
@@ -164,9 +169,25 @@ function isSessionErrorMessage(message) {
   return (
     text.includes("invalid or expired session") ||
     text.includes("missing access token") ||
+    text.includes("chưa đăng nhập") ||
     text.includes("phiên đăng nhập không hợp lệ") ||
     text.includes("thiếu mã truy cập")
   );
+}
+
+function isProtectedApiPath(path) {
+  const normalized = String(path || "").trim().toLowerCase();
+  if (!normalized.startsWith("/api/")) return false;
+  return !(
+    normalized.startsWith("/api/login") ||
+    normalized.startsWith("/api/change-password-login") ||
+    normalized.startsWith("/api/meta") ||
+    normalized.startsWith("/api/server-time")
+  );
+}
+
+function invalidateApiGetCache() {
+  API_GET_CACHE.clear();
 }
 
 function forceSessionReset() {
@@ -357,11 +378,16 @@ function showToast(message, isError = false) {
 }
 
 async function api(path, options = {}) {
+  const {
+    cacheTtlMs = 0,
+    bypassCache = false,
+    ...fetchOptions
+  } = options;
   const headers = {
-    ...(options.headers || {}),
+    ...(fetchOptions.headers || {}),
   };
-  const method = String(options.method || "GET").toUpperCase();
-  const hasBody = options.body !== undefined && options.body !== null;
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  const hasBody = fetchOptions.body !== undefined && fetchOptions.body !== null;
   if (hasBody && !headers["Content-Type"] && !headers["content-type"]) {
     headers["Content-Type"] = "application/json";
   }
@@ -369,17 +395,62 @@ async function api(path, options = {}) {
     headers.Authorization = `Bearer ${state.token}`;
   }
 
-  const res = await fetch(path, { ...options, method, headers });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const rawError = payload.error || `Yêu cầu thất bại: ${res.status}`;
-    if (res.status === 401 && state.token && isSessionErrorMessage(rawError)) {
-      forceSessionReset();
-      throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
-    }
-    throw new Error(localizeApiMessage(rawError));
+  const isGet = method === "GET" && !hasBody;
+  const cacheKey = `${method}:${path}`;
+  const shouldCache = isGet && !bypassCache && Number(cacheTtlMs) > 0;
+
+  if (!isGet) {
+    invalidateApiGetCache();
   }
-  return payload;
+
+  if (isProtectedApiPath(path) && !state.token) {
+    forceSessionReset();
+    throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+  }
+
+  if (shouldCache) {
+    const cached = API_GET_CACHE.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.payload;
+    }
+  }
+
+  if (isGet && API_GET_INFLIGHT.has(cacheKey)) {
+    return API_GET_INFLIGHT.get(cacheKey);
+  }
+
+  const requestPromise = (async () => {
+    const res = await fetch(path, { ...fetchOptions, method, headers });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const rawError = payload.error || `Yêu cầu thất bại: ${res.status}`;
+      if (res.status === 401 && state.token && isSessionErrorMessage(rawError)) {
+        forceSessionReset();
+        throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+      }
+      throw new Error(localizeApiMessage(rawError));
+    }
+
+    if (shouldCache) {
+      API_GET_CACHE.set(cacheKey, {
+        payload,
+        expiresAt: Date.now() + Number(cacheTtlMs),
+      });
+    }
+    return payload;
+  })();
+
+  if (isGet) {
+    API_GET_INFLIGHT.set(cacheKey, requestPromise);
+  }
+
+  try {
+    return await requestPromise;
+  } finally {
+    if (isGet) {
+      API_GET_INFLIGHT.delete(cacheKey);
+    }
+  }
 }
 
 async function withButtonLocks(buttonSelectors, action, { loadingText = "Đang lưu..." } = {}) {
@@ -842,6 +913,7 @@ function renderNav() {
 
 async function renderRoute() {
   if (!state.currentUser) return;
+  await ensureAppMetaLoaded();
   ensureValidRoute();
   const key = activeRouteKey();
   renderNav();
@@ -856,17 +928,36 @@ async function renderRoute() {
 
   try {
     if (key === "employee-attendance") {
-      await Promise.all([loadMyAttendance("employee"), loadCheckInAvailability("employee")]);
+      if (!loadedRoutes.has(key)) {
+        await Promise.all([loadMyAttendance("employee"), loadCheckInAvailability("employee")]);
+        loadedRoutes.add(key);
+      }
     }
     if (key === "employee-shifts") {
-      await Promise.all([loadEmployeeShifts(), loadEmployeeRegistrationGroups()]);
+      if (!loadedRoutes.has(key)) {
+        await Promise.all([loadEmployeeShifts(), loadEmployeeRegistrationGroups()]);
+        loadedRoutes.add(key);
+      }
     }
-    if (key === "employee-assigned") await loadEmployeeAssignedSchedule();
-    if (key === "employee-issues") await loadMyIssues();
+    if (key === "employee-assigned") {
+      if (!loadedRoutes.has(key)) {
+        await loadEmployeeAssignedSchedule();
+        loadedRoutes.add(key);
+      }
+    }
+    if (key === "employee-issues") {
+      if (!loadedRoutes.has(key)) {
+        await loadMyIssues();
+        loadedRoutes.add(key);
+      }
+    }
 
     if (key === "manager-attendance") {
-      await Promise.all([loadMyAttendance("manager"), loadManagerShiftAttendanceToday()]);
-      await loadCheckInAvailability("manager");
+      if (!loadedRoutes.has(key)) {
+        await Promise.all([loadMyAttendance("manager"), loadManagerShiftAttendanceToday()]);
+        await loadCheckInAvailability("manager");
+        loadedRoutes.add(key);
+      }
       $("#manager-attendance-one-time-meta").textContent =
         "Nhấn Tạo QR cho ngày hôm nay. Mỗi lần nhân viên quét sẽ nhận mã xác thực một lần riêng.";
 
@@ -888,25 +979,59 @@ async function renderRoute() {
           `Khong tai duoc QR hom nay: ${message}. Vui long bam Tao QR lai.`;
       }
     }
-    if (key === "manager-self-shifts") await loadManagerSelfShifts();
-    if (key === "manager-schedule") {
-      await Promise.all([loadManagerSchedule(), loadManagerRegistrationGroups()]);
+    if (key === "manager-self-shifts") {
+      if (!loadedRoutes.has(key)) {
+        await loadManagerSelfShifts();
+        loadedRoutes.add(key);
+      }
     }
-    if (key === "manager-issues") await loadManagerIssues();
-    if (key === "manager-employees") await loadManagerEmployees();
+    if (key === "manager-schedule") {
+      if (!loadedRoutes.has(key)) {
+        await Promise.all([loadManagerSchedule(), loadManagerRegistrationGroups()]);
+        loadedRoutes.add(key);
+      }
+    }
+    if (key === "manager-issues") {
+      if (!loadedRoutes.has(key)) {
+        await loadManagerIssues();
+        loadedRoutes.add(key);
+      }
+    }
+    if (key === "manager-employees") {
+      if (!loadedRoutes.has(key)) {
+        await loadManagerEmployees();
+        loadedRoutes.add(key);
+      }
+    }
 
-    if (key === "ceo-chat") await loadCeoChat();
-    if (key === "ceo-issues") await loadCeoIssues();
+    if (key === "ceo-chat") {
+      if (!loadedRoutes.has(key)) {
+        await loadCeoChat();
+        loadedRoutes.add(key);
+      }
+    }
+    if (key === "ceo-issues") {
+      if (!loadedRoutes.has(key)) {
+        await loadCeoIssues();
+        loadedRoutes.add(key);
+      }
+    }
     if (key === "ceo-export") {
       loadCeoExportBranchOptions();
     }
     if (key === "ceo-branches") {
-      await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
+      if (!loadedRoutes.has(key)) {
+        await Promise.all([loadCeoBranches(), loadBranchAuditLogs()]);
+        loadedRoutes.add(key);
+      }
     }
     if (key === "ceo-users") {
-      loadCeoUserBranchOptions();
-      syncCeoUserRoleForm();
-      await loadCeoUsers();
+      if (!loadedRoutes.has(key)) {
+        loadCeoUserBranchOptions();
+        syncCeoUserRoleForm();
+        await loadCeoUsers();
+        loadedRoutes.add(key);
+      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Khong tai duoc du lieu";
@@ -1071,8 +1196,30 @@ async function refreshBranchesMeta({ force = false } = {}) {
   if (!force && state.branches.length) {
     return;
   }
-  const meta = await api("/api/meta");
+  const meta = await api("/api/meta", {
+    cacheTtlMs: force ? 0 : 60000,
+    bypassCache: force,
+  });
   state.branches = meta.branches || [];
+}
+
+async function ensureAppMetaLoaded() {
+  if (state.shifts.length && state.branches.length) {
+    return;
+  }
+
+  if (!appMetaLoadPromise) {
+    appMetaLoadPromise = (async () => {
+      const meta = await api("/api/meta", { cacheTtlMs: 60000 });
+      state.shifts = meta.shifts || [];
+      state.shiftByCode = new Map((state.shifts || []).map((shift) => [String(shift.code || "").toUpperCase(), shift]));
+      state.branches = meta.branches || [];
+    })().finally(() => {
+      appMetaLoadPromise = null;
+    });
+  }
+
+  await appMetaLoadPromise;
 }
 
 async function loadEmployeeBranches() {
@@ -3377,7 +3524,7 @@ async function loadBranchAuditLogs() {
     params.set("branch_id", String(ceoBranchAuditState.branchId));
   }
 
-  const payload = await api(`/api/admin/branch-audit-logs?${params.toString()}`);
+  const payload = await api(`/api/admin/branch-audit-logs?${params.toString()}`, { cacheTtlMs: 8000 });
   const list = $("#ceo-branch-audit-list");
   list.innerHTML = "";
 
@@ -3410,7 +3557,7 @@ async function loadCeoBranches() {
     params.set("q", ceoBranchState.query);
   }
 
-  const payload = await api(`/api/admin/branches?${params.toString()}`);
+  const payload = await api(`/api/admin/branches?${params.toString()}`, { cacheTtlMs: 8000 });
   const branches = payload.items || [];
   const list = $("#ceo-branches-list");
   list.innerHTML = "";
@@ -3641,7 +3788,7 @@ async function createUserByCeo() {
 }
 
 async function loadCeoUsers() {
-  const payload = await api("/api/admin/users");
+  const payload = await api("/api/admin/users", { cacheTtlMs: 8000 });
   const list = $("#ceo-users-list");
   if (!list) return;
   list.innerHTML = "";
@@ -4168,11 +4315,6 @@ function attachEvents() {
 }
 
 async function bootstrap() {
-  const meta = await api("/api/meta");
-  state.shifts = meta.shifts;
-  state.shiftByCode = new Map((state.shifts || []).map((shift) => [String(shift.code || "").toUpperCase(), shift]));
-  state.branches = meta.branches;
-
   $("#week-start").value = mondayOfCurrentWeekISO();
 
   await tryRestoreSession();
@@ -4181,6 +4323,7 @@ async function bootstrap() {
     await loadProfileRequiredForm();
   }
   if (state.currentUser) {
+    await ensureAppMetaLoaded();
     ensureValidRoute();
     await renderRoute();
   }

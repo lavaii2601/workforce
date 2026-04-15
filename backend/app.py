@@ -27,6 +27,10 @@ from .services.openjarvis_service import (
 
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+# Global cache for expensive read endpoints
+META_CACHE = {"data": None, "expires_at": 0}
+META_CACHE_TTL_SECONDS = 300  # 5 minutes
 TOKEN_LIFETIME_DAYS = 7
 DEFAULT_STATELESS_SESSION_SECRET = "workforce-session-secret"
 DEFAULT_ATTENDANCE_QR_SECRET = "workforce-attendance-qr-secret"
@@ -1026,6 +1030,7 @@ def create_app():
             "SHIFT_DEFINITIONS": SHIFT_DEFINITIONS,
             "ROLE_PERMISSIONS": ROLE_PERMISSIONS,
             "PROFILE_REQUIRED_ROLES": PROFILE_REQUIRED_ROLES,
+            "_meta_cache": META_CACHE,
         },
     )
 

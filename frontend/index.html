@@ -582,6 +582,18 @@
     <section id="toast" class="toast hidden"></section>
   </main>
 
+  <style id="backdrop-style">
+    .backdrop {
+      position: fixed;
+      inset: 0;
+      background-image: linear-gradient(rgba(255, 255, 255, 0.15) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.15) 1px, transparent 1px);
+      background-size: 28px 28px;
+      opacity: 0.4;
+      pointer-events: none;
+    }
+  </style>
+
   <script src="/js/app.js"></script>
 </body>
 </html>

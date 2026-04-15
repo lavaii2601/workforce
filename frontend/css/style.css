@@ -18,7 +18,6 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
-/* Compact Mode */
 body.compact-mode {
   --control-h: 34px;
   --space-1: 4px;
@@ -48,16 +47,6 @@ body {
 
 body.no-scroll {
   overflow: hidden;
-}
-
-.backdrop {
-  position: fixed;
-  inset: 0;
-  background-image: linear-gradient(rgba(255, 255, 255, 0.15) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.15) 1px, transparent 1px);
-  background-size: 28px 28px;
-  opacity: 0.4;
-  pointer-events: none;
 }
 
 .shell {
@@ -2437,10 +2426,6 @@ body.compact-mode .issue-detail-box p {
 body.pwa-mode {
   padding-top: var(--safe-top);
   padding-bottom: var(--safe-bottom);
-}
-
-body.pwa-mode .backdrop {
-  opacity: 0.24;
 }
 
 body.pwa-mode .shell {

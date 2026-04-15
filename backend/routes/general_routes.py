@@ -30,6 +30,7 @@ def register_general_routes(app, deps):
     shift_definitions = deps["SHIFT_DEFINITIONS"]
     role_permissions = deps["ROLE_PERMISSIONS"]
     profile_required_roles = deps["PROFILE_REQUIRED_ROLES"]
+    meta_cache = deps.get("_meta_cache")
 
     @app.get("/api/health")
     def health():
@@ -344,15 +345,28 @@ def register_general_routes(app, deps):
 
     @app.get("/api/meta")
     def meta():
+        from datetime import datetime
+        
+        # Serve from cache if still valid
+        if (meta_cache and meta_cache["data"] and 
+            datetime.utcnow().timestamp() < meta_cache["expires_at"]):
+            return jsonify(meta_cache["data"])
+        
         conn = get_conn()
         branches = conn.execute("SELECT id, name FROM branches ORDER BY name").fetchall()
         conn.close()
-        return jsonify(
-            {
-                "shifts": shift_definitions,
-                "branches": [dict(row) for row in branches],
-            }
-        )
+        
+        response_data = {
+            "shifts": shift_definitions,
+            "branches": [dict(row) for row in branches],
+        }
+        
+        # Update cache
+        if meta_cache is not None:
+            meta_cache["data"] = response_data
+            meta_cache["expires_at"] = datetime.utcnow().timestamp() + 300  # 5 minutes
+        
+        return jsonify(response_data)
 
     @app.get("/api/current-user")
     def current_user():
