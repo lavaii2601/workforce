@@ -55,7 +55,7 @@
   "crons": [
     {
       "path": "/api/system/cron/attendance-auto-checkout",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
