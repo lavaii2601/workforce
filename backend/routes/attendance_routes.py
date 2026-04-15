@@ -30,6 +30,11 @@ def register_attendance_routes(app, deps):
     auto_checkout_grace_minutes = 10
 
     attendance_qr_one_time_ttl_seconds = deps["ATTENDANCE_QR_ONE_TIME_TTL_SECONDS"]
+    try:
+        attendance_qr_rotate_seconds = int(deps.get("ATTENDANCE_QR_ROTATE_SECONDS", 90))
+    except (TypeError, ValueError):
+        attendance_qr_rotate_seconds = 90
+    attendance_qr_rotate_seconds = max(30, min(900, attendance_qr_rotate_seconds))
     attendance_qr_enabled = deps.get("ATTENDANCE_QR_ENABLED", True)
     qr_rate_limit_lock = Lock()
     qr_scan_attempts = {}
@@ -641,11 +646,9 @@ def register_attendance_routes(app, deps):
             return jsonify({"error": "Branch not found"}), 404
 
         now_dt = datetime.now()
-        expires_at_dt = now_dt.replace(hour=23, minute=59, second=59, microsecond=0)
-        if expires_at_dt <= now_dt:
-            expires_at_dt = expires_at_dt + timedelta(days=1)
+        expires_at_dt = now_dt + timedelta(seconds=attendance_qr_rotate_seconds)
         expires_ts = int(expires_at_dt.timestamp())
-        qr_nonce = f"DAY_{now_dt.strftime('%Y%m%d')}_{int(now_dt.timestamp())}_{generate_one_time_attendance_code(6)}"
+        qr_nonce = f"ROT_{int(now_dt.timestamp())}_{generate_one_time_attendance_code(8)}"
         qr_token = build_attendance_qr_token(branch["id"], expires_ts, qr_nonce)
         expires_at = format_db_datetime(expires_at_dt)
         conn.close()

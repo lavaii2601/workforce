@@ -74,6 +74,11 @@ def create_app():
 
     PROFILE_REQUIRED_ROLES = {"employee", "manager"}
     ATTENDANCE_QR_ONE_TIME_TTL_SECONDS = 45
+    try:
+        ATTENDANCE_QR_ROTATE_SECONDS = int(os.getenv("ATTENDANCE_QR_ROTATE_SECONDS", "90") or "90")
+    except ValueError:
+        ATTENDANCE_QR_ROTATE_SECONDS = 90
+    ATTENDANCE_QR_ROTATE_SECONDS = max(30, min(900, ATTENDANCE_QR_ROTATE_SECONDS))
     ATTENDANCE_QR_SECRET = os.getenv("ATTENDANCE_QR_SECRET", DEFAULT_ATTENDANCE_QR_SECRET)
     ATTENDANCE_QR_ENABLED = True
     STATELESS_SESSION_SECRET = os.getenv("SESSION_TOKEN_SECRET", DEFAULT_STATELESS_SESSION_SECRET)
@@ -1058,6 +1063,7 @@ def create_app():
             "_generate_one_time_attendance_code": _generate_one_time_attendance_code,
             "_weekly_attendance_detail_rows": _weekly_attendance_detail_rows,
             "ATTENDANCE_QR_ONE_TIME_TTL_SECONDS": ATTENDANCE_QR_ONE_TIME_TTL_SECONDS,
+            "ATTENDANCE_QR_ROTATE_SECONDS": ATTENDANCE_QR_ROTATE_SECONDS,
             "ATTENDANCE_QR_ENABLED": ATTENDANCE_QR_ENABLED,
             "SHIFT_DEFINITIONS": SHIFT_DEFINITIONS,
         },

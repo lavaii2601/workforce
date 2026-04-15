@@ -72,6 +72,8 @@ let employeeQrCameraStream = null;
 let employeeQrCameraLoopId = null;
 let employeeQrDetectInProgress = false;
 let appMetaLoadPromise = null;
+let managerQrAutoRefreshTimerId = null;
+let managerQrAutoRefreshInFlight = false;
 const loadedRoutes = new Set();  // Track which routes have already fetched their data
 
 const WEEK_DAYS = [1, 2, 3, 4, 5, 6, 7];
@@ -191,6 +193,7 @@ function invalidateApiGetCache() {
 }
 
 function forceSessionReset() {
+  stopManagerQrAutoRefresh();
   state.token = null;
   state.currentUser = null;
   state.managerDailyQr = null;
@@ -916,6 +919,9 @@ async function renderRoute() {
   await ensureAppMetaLoaded();
   ensureValidRoute();
   const key = activeRouteKey();
+  if (key !== "manager-attendance") {
+    stopManagerQrAutoRefresh();
+  }
   renderNav();
 
   document.querySelectorAll(".route-view").forEach((node) => node.classList.add("hidden"));
@@ -1051,6 +1057,47 @@ function isManagerDailyQrValid(payload) {
   return expiresMs > Date.now() + 1000;
 }
 
+function stopManagerQrAutoRefresh() {
+  if (managerQrAutoRefreshTimerId) {
+    clearTimeout(managerQrAutoRefreshTimerId);
+    managerQrAutoRefreshTimerId = null;
+  }
+  managerQrAutoRefreshInFlight = false;
+}
+
+function scheduleManagerQrAutoRefresh(ttlSeconds) {
+  stopManagerQrAutoRefresh();
+  if (!state.currentUser || state.currentUser.role !== "manager") return;
+  if (activeRouteKey() !== "manager-attendance") return;
+
+  const ttl = Number(ttlSeconds);
+  const delayMs = Number.isFinite(ttl) && ttl > 10
+    ? Math.max(10000, Math.min(120000, (ttl - 5) * 1000))
+    : 30000;
+
+  managerQrAutoRefreshTimerId = setTimeout(async () => {
+    if (!state.currentUser || state.currentUser.role !== "manager" || activeRouteKey() !== "manager-attendance") {
+      stopManagerQrAutoRefresh();
+      return;
+    }
+    if (managerQrAutoRefreshInFlight) {
+      return;
+    }
+
+    managerQrAutoRefreshInFlight = true;
+    try {
+      await generateManagerOneTimeQr({ showToastSuccess: false });
+    } catch {
+      // Keep retrying silently to avoid toast noise while network is unstable.
+      managerQrAutoRefreshTimerId = setTimeout(() => {
+        scheduleManagerQrAutoRefresh(30);
+      }, 30000);
+    } finally {
+      managerQrAutoRefreshInFlight = false;
+    }
+  }, delayMs);
+}
+
 function applyManagerDailyQr(payload, { showToastSuccess = true } = {}) {
   const imageNode = $("#manager-attendance-one-time-qr-image");
   if (imageNode) {
@@ -1058,10 +1105,11 @@ function applyManagerDailyQr(payload, { showToastSuccess = true } = {}) {
     imageNode.classList.toggle("hidden", !payload.qr_image_data_url);
   }
   $("#manager-attendance-one-time-meta").textContent =
-    `Đã tạo QR theo ngày | Hết hạn lúc: ${formatDateTimeDisplay(payload.expires_at)}`;
+    `QR đang xoay vòng tự động | Hết hạn lúc: ${formatDateTimeDisplay(payload.expires_at)}`;
   state.managerDailyQr = payload;
+  scheduleManagerQrAutoRefresh(payload.ttl_seconds);
   if (showToastSuccess) {
-    showToast("Da tao QR theo ngay");
+    showToast("Đã tạo QR mới");
   }
 }
 
@@ -3933,6 +3981,7 @@ async function logout() {
   } catch {
     // ignore
   }
+  stopManagerQrAutoRefresh();
   clearManagerEmployeeAvatarObjectUrls();
   state.token = null;
   state.currentUser = null;
