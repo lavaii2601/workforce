@@ -4,7 +4,7 @@ import socket
 import sqlite3
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 from werkzeug.security import generate_password_hash
 from .constants import SHIFT_DEFINITIONS
@@ -25,6 +25,37 @@ ID_TABLES = {
     "issue_reports",
     "issue_report_replies",
     "audit_logs",
+}
+
+ALLOWED_POSTGRES_URI_QUERY_PARAMS = {
+    "application_name",
+    "channel_binding",
+    "client_encoding",
+    "connect_timeout",
+    "gssencmode",
+    "hostaddr",
+    "keepalives",
+    "keepalives_count",
+    "keepalives_idle",
+    "keepalives_interval",
+    "load_balance_hosts",
+    "options",
+    "passfile",
+    "password",
+    "port",
+    "requirepeer",
+    "requiressl",
+    "service",
+    "sslcert",
+    "sslcompression",
+    "sslcrl",
+    "sslkey",
+    "sslmode",
+    "sslpassword",
+    "sslrootcert",
+    "sslsni",
+    "target_session_attrs",
+    "user",
 }
 
 
@@ -52,6 +83,32 @@ def _ensure_sslmode(url):
     return f"{url}{separator}sslmode=require"
 
 
+def _sanitize_postgres_url_query(url):
+    if not url:
+        return url
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        return url
+
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    if not pairs:
+        return url
+
+    filtered_pairs = [
+        (key, value)
+        for key, value in pairs
+        if key.strip().lower() in ALLOWED_POSTGRES_URI_QUERY_PARAMS
+    ]
+    if len(filtered_pairs) == len(pairs):
+        return url
+
+    removed_keys = sorted({key for key, _ in pairs if key.strip().lower() not in ALLOWED_POSTGRES_URI_QUERY_PARAMS})
+    print(f"WARNING: Removed unsupported PostgreSQL URI params: {', '.join(removed_keys)}")
+
+    return parsed._replace(query=urlencode(filtered_pairs)).geturl()
+
+
 def _resolve_host_to_ipv4(hostname):
     """Resolve hostname to an IPv4 address.
 
@@ -77,6 +134,7 @@ def _prepare_database_url(url):
     if not url:
         return url
 
+    url = _sanitize_postgres_url_query(url)
     url = _ensure_sslmode(url)
 
     # Add connect_timeout if missing
