@@ -93,6 +93,7 @@ def create_app():
         if host.strip()
     }
     allowed_hosts.update(configured_allowed_hosts)
+    host_header_enforced = IS_VERCEL or bool(configured_allowed_hosts)
 
     def _host_is_allowed(host):
         if host in allowed_hosts:
@@ -138,7 +139,7 @@ def create_app():
     @app.before_request
     def _reject_invalid_json_requests():
         host = (request.host or "").split(":", 1)[0].strip().lower()
-        if host and not _host_is_allowed(host):
+        if host_header_enforced and host and not _host_is_allowed(host):
             return jsonify({"error": "Invalid host header"}), 400
 
         if not request.path.startswith("/api/"):
