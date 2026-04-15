@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 
-import qrcode
 from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -75,12 +74,35 @@ def create_app():
     ATTENDANCE_QR_ENABLED = True
     STATELESS_SESSION_SECRET = os.getenv("SESSION_TOKEN_SECRET", DEFAULT_STATELESS_SESSION_SECRET)
     IS_VERCEL = os.getenv("VERCEL") == "1"
+    VERCEL_URL = (os.getenv("VERCEL_URL") or "").strip().lower()
     DB_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     SHIFT_DEFINITION_MAP = {item["code"]: item for item in SHIFT_DEFINITIONS}
     LOGIN_WINDOW_SECONDS = 10 * 60
     LOGIN_MAX_FAILURES = 5
     login_attempts_lock = Lock()
     login_attempts = {}
+    allowed_hosts = {
+        "localhost",
+        "127.0.0.1",
+    }
+    if VERCEL_URL:
+        allowed_hosts.add(VERCEL_URL)
+    configured_allowed_hosts = {
+        host.strip().lower()
+        for host in (os.getenv("ALLOWED_HOSTS") or "").split(",")
+        if host.strip()
+    }
+    allowed_hosts.update(configured_allowed_hosts)
+
+    def _host_is_allowed(host):
+        if host in allowed_hosts:
+            return True
+        for pattern in allowed_hosts:
+            if pattern.startswith("*."):
+                suffix = pattern[1:]
+                if host.endswith(suffix) and host != suffix[1:]:
+                    return True
+        return False
 
     requires_stateless_for_ephemeral_db = IS_VERCEL and not is_postgres_backend()
     stateless_session_enabled = os.getenv("STATELESS_SESSION") == "1" or requires_stateless_for_ephemeral_db
@@ -115,6 +137,10 @@ def create_app():
 
     @app.before_request
     def _reject_invalid_json_requests():
+        host = (request.host or "").split(":", 1)[0].strip().lower()
+        if host and not _host_is_allowed(host):
+            return jsonify({"error": "Invalid host header"}), 400
+
         if not request.path.startswith("/api/"):
             return None
 
@@ -128,10 +154,23 @@ def create_app():
     def _set_security_headers(response):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Pragma"] = "no-cache"
+
+        path = request.path or ""
+        if path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        elif path == "/sw.js":
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        elif re.search(r"\.(?:css|js|svg|png|jpg|jpeg|webp|gif|ico|woff2?)$", path, flags=re.IGNORECASE):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif path in {"/", "/index.html", "/manifest.webmanifest"}:
+            response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
+
         if os.getenv("VERCEL") == "1":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         csp = (
@@ -365,6 +404,8 @@ def create_app():
         return dt_value.strftime(DB_DATETIME_FORMAT)
 
     def _parse_db_datetime(raw_value):
+        if isinstance(raw_value, datetime):
+            return raw_value
         return datetime.strptime(raw_value, DB_DATETIME_FORMAT)
 
     def _week_start_and_day_for_datetime(current_dt):
@@ -391,7 +432,10 @@ def create_app():
         if not shift:
             return None
         start_h, start_m = [int(part) for part in shift["start"].split(":")]
-        day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=day_of_week - 1)
+        try:
+            day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=day_of_week - 1)
+        except (TypeError, ValueError):
+            return None
         return day_dt.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
 
     def _upsert_shift_attendance_mark(
@@ -834,6 +878,8 @@ def create_app():
         return f"WM2|{branch_id}|{qr_token}"
 
     def _build_qr_image_data_url(content):
+        import qrcode
+
         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=7, border=2)
         qr.add_data(content)
         qr.make(fit=True)

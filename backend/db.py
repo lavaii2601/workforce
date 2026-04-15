@@ -34,6 +34,7 @@ ID_TABLES = {
 def _resolve_database_url():
     candidates = [
         os.getenv("DATABASE_URL"),
+        os.getenv("SUPABASE_DATABASE_URL"),
         os.getenv("POSTGRES_URL"),
         os.getenv("POSTGRES_PRISMA_URL"),
         os.getenv("POSTGRES_URL_NON_POOLING"),
@@ -185,6 +186,9 @@ class _PgConnAdapter:
 
     def commit(self):
         self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
 
     def close(self):
         self._conn.close()
@@ -525,8 +529,9 @@ def _init_db_inner():
         CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_confirmed
         ON attendance_logs(employee_id, confirmed_at, check_out_at);
 
-        CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_open
-        ON attendance_logs(employee_id, check_out_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_attendance_logs_employee_open_session
+        ON attendance_logs(employee_id)
+        WHERE check_out_at IS NULL;
 
         CREATE INDEX IF NOT EXISTS idx_attendance_logs_branch_checkin
         ON attendance_logs(branch_id, check_in_at);
@@ -1016,7 +1021,7 @@ def _run_migrations(conn):
         "CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_confirmed ON attendance_logs(employee_id, confirmed_at, check_out_at)"
     )
     cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_open ON attendance_logs(employee_id, check_out_at, id)"
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_attendance_logs_employee_open_session ON attendance_logs(employee_id) WHERE check_out_at IS NULL"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_attendance_logs_branch_checkin ON attendance_logs(branch_id, check_in_at)"

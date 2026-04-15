@@ -38,6 +38,19 @@ def register_attendance_routes(app, deps):
     qr_scan_limit_per_window = 25
     qr_checkin_limit_per_window = 15
 
+    def _is_valid_week_start(value):
+        try:
+            datetime.strptime((value or "").strip(), "%Y-%m-%d")
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    def _is_open_session_conflict(exc):
+        text = str(exc).lower()
+        if "ux_attendance_logs_employee_open_session" in text:
+            return True
+        return "unique" in text and "attendance_logs" in text and "employee_id" in text
+
     def _prune_bucket_window(bucket: Dict[str, Deque[int]], key: str, now_ts: int) -> Deque[int]:
         attempts = bucket.get(key)
         if attempts is None:
@@ -375,13 +388,24 @@ def register_attendance_routes(app, deps):
             minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60))
         
         check_in_time_str = format_db_datetime(check_in_dt)
-        cur = conn.execute(
-            """
-            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, scheduled_shift_start_at, minutes_late, confirmed_at, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (user["id"], branch_id, check_in_time_str, scheduled_shift_start_at_str, minutes_late, check_in_time_str, note),
-        )
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, scheduled_shift_start_at, minutes_late, confirmed_at, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user["id"], branch_id, check_in_time_str, scheduled_shift_start_at_str, minutes_late, check_in_time_str, note),
+            )
+        except Exception as exc:
+            if _is_open_session_conflict(exc):
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+                return jsonify({"error": "Please check-out current session before new check-in"}), 400
+            conn.close()
+            raise
         _log_attendance_confirmation(
             conn,
             attendance_id=cur.lastrowid,
@@ -556,6 +580,8 @@ def register_attendance_routes(app, deps):
         week_start = (request.args.get("week_start") or "").strip()
         if not week_start:
             return jsonify({"error": "week_start is required"}), 400
+        if not _is_valid_week_start(week_start):
+            return jsonify({"error": "week_start must be in YYYY-MM-DD format"}), 400
         start_dt, end_dt = week_range(week_start)
 
         conn = get_conn()
@@ -811,13 +837,24 @@ def register_attendance_routes(app, deps):
         check_in_dt = now_dt
         minutes_late = max(0, int((check_in_dt - shift_start_dt).total_seconds() // 60)) if shift_start_dt else 0
         
-        cur = conn.execute(
-            """
-            INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, scheduled_shift_start_at, minutes_late, confirmed_at, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (user["id"], branch_id, now_raw, scheduled_shift_start_at_str, minutes_late, now_raw, note),
-        )
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO attendance_logs(employee_id, branch_id, check_in_at, scheduled_shift_start_at, minutes_late, confirmed_at, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user["id"], branch_id, now_raw, scheduled_shift_start_at_str, minutes_late, now_raw, note),
+            )
+        except Exception as exc:
+            if _is_open_session_conflict(exc):
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+                return jsonify({"error": "Please check-out current session before new check-in"}), 400
+            conn.close()
+            raise
 
         _log_attendance_confirmation(
             conn,

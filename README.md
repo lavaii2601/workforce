@@ -174,11 +174,26 @@ Vi vay khong the luu DB lau dai tren Vercel bang file SQLite.
 
 ## 11) Bien moi truong quan trong
 
-- DB: `DATABASE_URL`, `POSTGRES_URL`, `POSTGRES_PRISMA_URL`, `POSTGRES_URL_NON_POOLING`, `SQLITE_PATH`.
+- DB: `DATABASE_URL`, `SUPABASE_DATABASE_URL`, `POSTGRES_URL`, `POSTGRES_PRISMA_URL`, `POSTGRES_URL_NON_POOLING`, `SQLITE_PATH`.
 - Session/security: `STATELESS_SESSION`, `SESSION_TOKEN_SECRET`, `ATTENDANCE_QR_SECRET`, `FLASK_DEBUG`.
-- OpenJarvis: `OPENJARVIS_ENABLED`, `OPENJARVIS_API_URL`, `OPENJARVIS_MODEL`, `OPENJARVIS_TIMEOUT_SECONDS`, `OPENJARVIS_TEMPERATURE`, `OPENJARVIS_MAX_TOKENS`.
+- Host security: `ALLOWED_HOSTS` (danh sach host hop le, phan tach boi dau phay; can dat khi dung custom domain).
+- OpenJarvis: `OPENJARVIS_ENABLED`, `OPENJARVIS_API_URL`, `OPENJARVIS_API_KEY`, `OPENJARVIS_MODEL`, `OPENJARVIS_TIMEOUT_SECONDS`, `OPENJARVIS_TEMPERATURE`, `OPENJARVIS_MAX_TOKENS`.
 
-## 12) Ghi chu nhanh cho team
+## 12) Setup Supabase (nhanh)
+
+1. Tao project Supabase va vao SQL Editor.
+2. Copy noi dung file `supabase/schema.sql` trong repo va chay mot lan.
+3. Lay chuoi ket noi Postgres tu Supabase (Connection string), gan vao env:
+	- `DATABASE_URL=...` (uu tien)
+	- hoac `SUPABASE_DATABASE_URL=...`
+4. Neu chua co trong connection string, backend se tu them `sslmode=require`.
+5. Deploy/restart app de backend khoi tao ket noi Postgres.
+
+Goi y production Vercel:
+- Dat `ALLOWED_HOSTS` de tranh Host Header Injection (vd: `your-domain.com,*.vercel.app` theo domain ban su dung).
+- Root page (`/`) da duoc phuc vu static + cache ngan; file CSS/JS/Icon cache immutable de giam TTFB va tai lai nhanh hon.
+
+## 13) Ghi chu nhanh cho team
 
 - Local/dev: SQLite la du.
 - Staging/prod: dung Postgres de session revocable va du lieu ben vung.

@@ -20,6 +20,13 @@ def register_leadership_routes(app, deps):
     build_branch_update_audit_details = deps["_build_branch_update_audit_details"]
     build_branch_delete_audit_details = deps["_build_branch_delete_audit_details"]
 
+    def _is_valid_week_start(value):
+        try:
+            datetime.strptime((value or "").strip(), "%Y-%m-%d")
+            return True
+        except (TypeError, ValueError):
+            return False
+
     @app.get("/api/ceo/chat")
     def get_ceo_chat():
         _, error = get_user_from_token(roles={"ceo"})
@@ -162,6 +169,8 @@ def register_leadership_routes(app, deps):
         week_start = (request.args.get("week_start") or "").strip()
         if not week_start:
             return jsonify({"error": "week_start is required"}), 400
+        if not _is_valid_week_start(week_start):
+            return jsonify({"error": "week_start must be in YYYY-MM-DD format"}), 400
 
         branch_id_raw = (request.args.get("branch_id") or "").strip()
         branch_id = None

@@ -56,8 +56,18 @@ def register_operations_routes(app, deps):
         if not text:
             return None
         hour_text, minute_text = text.split(":")
-        day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=int(day_of_week) - 1)
+        try:
+            day_dt = datetime.strptime(week_start, "%Y-%m-%d") + timedelta(days=int(day_of_week) - 1)
+        except (TypeError, ValueError):
+            return None
         return day_dt.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
+
+    def _is_valid_week_start(value):
+        try:
+            datetime.strptime((value or "").strip(), "%Y-%m-%d")
+            return True
+        except (TypeError, ValueError):
+            return False
 
     def _schedule_rows_for_branch_week(conn, week_start, branch_id):
         rows = conn.execute(
@@ -1931,6 +1941,8 @@ def register_operations_routes(app, deps):
         week_start = (request.args.get("week_start") or "").strip()
         if not week_start:
             return jsonify({"error": "week_start is required"}), 400
+        if not _is_valid_week_start(week_start):
+            return jsonify({"error": "week_start must be in YYYY-MM-DD format"}), 400
 
         conn = get_conn()
         rows = weekly_hours_rows(conn, week_start, branch_id=user["branch_id"])

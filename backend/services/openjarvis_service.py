@@ -32,6 +32,7 @@ def _openjarvis_config():
     return {
         "enabled": enabled,
         "base_url": base_url,
+        "api_key": (os.getenv("OPENJARVIS_API_KEY") or "").strip(),
         "model": (os.getenv("OPENJARVIS_MODEL") or "qwen3:8b").strip(),
         "temperature": _as_float(os.getenv("OPENJARVIS_TEMPERATURE"), 0.2),
         "max_tokens": _as_int(os.getenv("OPENJARVIS_MAX_TOKENS"), 700),
@@ -229,10 +230,14 @@ def _call_openjarvis_chat(*, messages, config):
         "max_tokens": config["max_tokens"],
         "stream": False,
     }
+    headers = {"Content-Type": "application/json"}
+    if config.get("api_key"):
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+
     req = urlrequest.Request(
         f"{config['base_url']}/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
 

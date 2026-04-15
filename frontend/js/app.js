@@ -137,6 +137,11 @@ function toSafeChatHtml(value) {
   return escapeHtml(value || "").replaceAll("\n", "<br />");
 }
 
+function isSafeAvatarDataUrl(value) {
+  const text = String(value || "").trim();
+  return /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(text);
+}
+
 function issueStatusLabel(value) {
   const status = String(value || "").trim().toLowerCase();
   if (status === "open") return "Mới";
@@ -620,7 +625,7 @@ function setShellByAuth() {
   const avatarNode = $("#sidebar-avatar");
   avatarNode.textContent = avatarText || "U";
   const avatarImage = state.currentUser.profile?.avatar_data_url || "";
-  if (avatarImage) {
+  if (avatarImage && isSafeAvatarDataUrl(avatarImage)) {
     avatarNode.style.backgroundImage = `url(${avatarImage})`;
     avatarNode.style.backgroundSize = "cover";
     avatarNode.style.backgroundPosition = "center";
@@ -1097,8 +1102,9 @@ async function loadMyAttendance(viewMode) {
     const confirmedText = item.confirmed_at
       ? ` | Mốc tính công: ${formatDateTimeDisplay(item.confirmed_at)}`
       : "";
-    const sourceText = attendanceSourceText(item);
-    row.innerHTML = `<span>${item.branch_name} | ${formatDateTimeDisplay(item.check_in_at)} -> ${item.check_out_at ? formatDateTimeDisplay(item.check_out_at) : "Đang làm"}${confirmedText}<br /><small>${sourceText}</small></span><strong>${(item.minutes_worked / 60).toFixed(2)}h</strong>`;
+    const sourceText = escapeHtml(attendanceSourceText(item));
+    const safeBranchName = escapeHtml(item.branch_name || "-");
+    row.innerHTML = `<span>${safeBranchName} | ${formatDateTimeDisplay(item.check_in_at)} -> ${item.check_out_at ? formatDateTimeDisplay(item.check_out_at) : "Đang làm"}${confirmedText}<br /><small>${sourceText}</small></span><strong>${(item.minutes_worked / 60).toFixed(2)}h</strong>`;
     fragment.appendChild(row);
   });
   const sum = document.createElement("div");

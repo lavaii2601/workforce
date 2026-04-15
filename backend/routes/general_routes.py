@@ -1,3 +1,5 @@
+import base64
+import binascii
 import re
 import secrets
 from datetime import datetime, timedelta
@@ -274,16 +276,25 @@ def register_general_routes(app, deps):
             return jsonify({"error": "date_of_birth is required"}), 400
         if not phone_number:
             return jsonify({"error": "phone_number is required"}), 400
-        if not re.fullmatch(r"[0-9+]{8,15}", phone_number):
-            return jsonify({"error": "phone_number must be 8-15 digits or include '+'"}), 400
+        if not re.fullmatch(r"\+?[0-9]{7,14}", phone_number):
+            return jsonify({"error": "phone_number must be a valid phone number"}), 400
         if not address:
             return jsonify({"error": "address is required"}), 400
         if not avatar_data_url:
             return jsonify({"error": "avatar_data_url is required"}), 400
         if not avatar_data_url.startswith("data:image/"):
             return jsonify({"error": "avatar_data_url must be a valid image data URL"}), 400
+        if avatar_data_url.lower().startswith("data:image/svg"):
+            return jsonify({"error": "SVG avatars are not supported"}), 400
+        if not re.fullmatch(r"data:image/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+", avatar_data_url, flags=re.IGNORECASE):
+            return jsonify({"error": "avatar_data_url must be a valid base64 image data URL"}), 400
         if len(avatar_data_url) > MAX_AVATAR_DATA_URL_LENGTH:
             return jsonify({"error": "Avatar image is too large. Please choose a smaller image."}), 400
+        try:
+            encoded = avatar_data_url.split(",", 1)[1]
+            base64.b64decode(encoded, validate=True)
+        except (IndexError, binascii.Error, ValueError):
+            return jsonify({"error": "avatar_data_url has invalid base64 content"}), 400
 
         conn = get_conn()
         conn.execute(
