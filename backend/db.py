@@ -676,10 +676,42 @@ def _pg_table_has_column(conn, table_name, column_name):
     return bool(row)
 
 
+def _pg_add_column_if_missing(conn, table_name, column_name, definition_sql):
+    if not _pg_table_has_column(conn, table_name, column_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition_sql}")
+
+
 def _run_postgres_migrations(conn):
     # Keep Postgres migration minimal and targeted for backwards compatibility.
-    if not _pg_table_has_column(conn, "issue_reports", "target_employee_id"):
-        conn.execute("ALTER TABLE issue_reports ADD COLUMN target_employee_id INTEGER")
+    _pg_add_column_if_missing(conn, "users", "avatar_data_url", "TEXT")
+    _pg_add_column_if_missing(conn, "users", "full_name", "TEXT")
+    _pg_add_column_if_missing(conn, "users", "date_of_birth", "TEXT")
+    _pg_add_column_if_missing(conn, "users", "phone_number", "TEXT")
+    _pg_add_column_if_missing(conn, "users", "address", "TEXT")
+    _pg_add_column_if_missing(conn, "users", "job_position", "TEXT")
+
+    _pg_add_column_if_missing(conn, "ceo_chat_messages", "sender_type", "TEXT DEFAULT 'user'")
+    _pg_add_column_if_missing(conn, "ceo_chat_messages", "sender_label", "TEXT")
+
+    _pg_add_column_if_missing(conn, "shift_preferences", "day_of_week", "INTEGER DEFAULT 0")
+    _pg_add_column_if_missing(conn, "shift_preferences", "registration_type", "TEXT DEFAULT 'individual'")
+    _pg_add_column_if_missing(conn, "shift_preferences", "group_code", "TEXT")
+    _pg_add_column_if_missing(conn, "shift_preferences", "flexible_start_at", "TEXT")
+    _pg_add_column_if_missing(conn, "shift_preferences", "flexible_end_at", "TEXT")
+
+    _pg_add_column_if_missing(conn, "weekly_schedule", "day_of_week", "INTEGER DEFAULT 0")
+    _pg_add_column_if_missing(conn, "weekly_schedule", "registration_type", "TEXT DEFAULT 'individual'")
+    _pg_add_column_if_missing(conn, "weekly_schedule", "group_code", "TEXT")
+    _pg_add_column_if_missing(conn, "weekly_schedule", "flexible_start_at", "TEXT")
+    _pg_add_column_if_missing(conn, "weekly_schedule", "flexible_end_at", "TEXT")
+
+    _pg_add_column_if_missing(conn, "attendance_logs", "confirmed_at", "TEXT")
+    _pg_add_column_if_missing(conn, "attendance_logs", "scheduled_shift_start_at", "TEXT")
+    _pg_add_column_if_missing(conn, "attendance_logs", "minutes_late", "INTEGER DEFAULT 0")
+    _pg_add_column_if_missing(conn, "attendance_logs", "checked_in_by_manager_id", "INTEGER")
+    _pg_add_column_if_missing(conn, "attendance_logs", "manager_check_in_note", "TEXT")
+
+    _pg_add_column_if_missing(conn, "issue_reports", "target_employee_id", "INTEGER")
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_issue_reports_target_employee ON issue_reports(target_employee_id, created_at)"
